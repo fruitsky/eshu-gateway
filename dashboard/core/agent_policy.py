@@ -260,3 +260,56 @@ def rate_limit_for(agent):
         return max(0, int(policy.get('rate_limit_per_min') or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def static_tool_decision(agent, integration, tool_name, tool, frozen=False):
+    """The request-independent part of the real MCP gate.
+
+    Both `_run_tool` and the agent Tools summary call this, so the summary
+    cannot drift from the decision. It covers the allowlist (patterns), the
+    caller restriction, the approval fallback, `always_gate`, the
+    integration's `gate_mode` and the freeze.
+
+    Returns a dict:
+      outcome: 'none' | 'run' | 'ask' | 'depends' | 'frozen'
+      allowed, reason, frozen, gate_mode, approval, always, should_gate.
+    A `depends` outcome means the request (for example a destructive path)
+    decides whether the call asks; it is neither a run nor an ask.
+    """
+    integration = integration or {}
+    tool = tool or {}
+    name = str(tool_name or '')
+    if not principal_allowed(agent, tool.get('principal_allow')):
+        return {'outcome': 'none', 'allowed': False,
+                'reason': 'tool is not available to this principal',
+                'frozen': False, 'gate_mode': '', 'approval': 'inherit',
+                'always': bool(tool.get('always_gate')),
+                'should_gate': False}
+    allowed, reason = tool_allowed(agent, integration.get('name') or '', name)
+    if not allowed:
+        return {'outcome': 'none', 'allowed': False, 'reason': reason,
+                'frozen': False, 'gate_mode': '', 'approval': 'inherit',
+                'always': bool(tool.get('always_gate')),
+                'should_gate': False}
+    gate_mode = (integration.get('gate_mode') or 'destructive').lower()
+    approval = approval_mode(agent, integration.get('name') or '', name)
+    always = bool(tool.get('always_gate'))
+    base = {'allowed': True, 'reason': '', 'frozen': False,
+            'gate_mode': gate_mode, 'approval': approval, 'always': always,
+            'should_gate': None}
+    if tool.get('read_only'):
+        # `_run_tool` executes reads before the gate, so no approval override
+        # or gate_mode applies to them.
+        return {**base, 'outcome': 'run', 'should_gate': False}
+    if frozen:
+        return {**base, 'outcome': 'frozen', 'frozen': True,
+                'should_gate': None}
+    if always or approval == 'gated':
+        return {**base, 'outcome': 'ask', 'should_gate': True}
+    if approval == 'ungated':
+        return {**base, 'outcome': 'run', 'should_gate': False}
+    if gate_mode == 'all':
+        return {**base, 'outcome': 'ask', 'should_gate': True}
+    if gate_mode == 'destructive':
+        return {**base, 'outcome': 'depends', 'should_gate': None}
+    return {**base, 'outcome': 'run', 'should_gate': False}

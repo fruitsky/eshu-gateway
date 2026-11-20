@@ -8,11 +8,16 @@ second rule.
 Read-only: this module never writes, never carries a secret and never calls an
 agent-facing endpoint.
 """
+import json
 import time
 
+from core import allowances
 from core.agent_config import get_agent_config
-from core.agent_policy import safe_ident
+from core.agent_policy import safe_ident, static_tool_decision
 from core.seeds import seed_label
+from db.agent_policies import get_agent_policy
+from db.agent_tokens import get_agent
+from db.gateways import get_trigger_freeze
 from db.integrations import (
     get_integration_config, get_integrations, get_tools,
 )
@@ -79,26 +84,6 @@ def _kind_words(kind):
                          (kind or 'Other').replace('_', ' ').title())
 
 
-def tool_outcome(tool, config):
-    """The one outcome rule: none, ask or run.
-
-    Defaults are the tool's own nature: a read runs, a change asks. An
-    explicit policy row can make a read ask or a change run, except that an
-    ``always_gate`` tool can never be made to run.
-    """
-    tools = (config or {}).get('tools') or {}
-    name = tool.get('name') or ''
-    if (tools.get('mode') or 'all') == 'allowlist':
-        if name not in (tools.get('allow') or []):
-            return 'none'
-    approval = (tools.get('approval') or {}).get(name)
-    if approval == 'gated':
-        return 'ask'
-    if approval == 'ungated' and not tool.get('always_gate'):
-        return 'run'
-    return 'run' if tool.get('read_only') else 'ask'
-
-
 def _live_permission(permission, now):
     if permission.get('suspended_at'):
         return False
@@ -106,13 +91,56 @@ def _live_permission(permission, now):
     return not expires or expires > now
 
 
-def _permission_entities(permission, devices):
-    label = permission.get('label_id') or ''
-    if label:
-        return [d['id'] for d in devices
-                if any((item.get('id') or '') == label
-                       for item in (d.get('labels') or []))]
-    return [str(e) for e in (permission.get('entities') or [])]
+def _permission_rows(agent_id, config):
+    """The live HA permissions with their pins and waiting joiners.
+
+    The S5 document omits `entities` for a label permission because the label
+    is its source of truth. Here the pins are what matters: the label's
+    current members can include waiting joiners that were never accepted.
+    """
+    try:
+        rows = [r for r in allowances.list_allowances()
+                if int(r.get('agent_id') or 0) == int(agent_id)
+                and (r.get('integration') or '') == 'ha']
+    except Exception:  # noqa: BLE001 - a summary must not fail a page
+        rows = []
+    if rows:
+        return rows
+    return ((config.get('home_assistant') or {}).get('permissions') or [])
+
+
+def _permission_pins(permission):
+    try:
+        pins = json.loads(permission.get('entities_json') or '[]')
+    except (TypeError, ValueError):
+        pins = permission.get('entities') or []
+    out = []
+    for pin in pins:
+        if isinstance(pin, dict):
+            entity_id = pin.get('entity_id')
+        else:
+            entity_id = pin
+        entity_id = str(entity_id or '').lower()
+        if entity_id:
+            out.append(entity_id)
+    return out
+
+
+def _permission_waiting(permission):
+    try:
+        pending = json.loads(permission.get('pending_json') or '[]')
+    except (TypeError, ValueError):
+        pending = permission.get('pending') or []
+    out = []
+    for pin in pending:
+        if isinstance(pin, dict):
+            entity_id = pin.get('entity_id')
+        else:
+            entity_id = pin
+        entity_id = str(entity_id or '').lower()
+        if entity_id:
+            out.append(entity_id)
+    return out
 
 
 def _device_noun(device_rows):
@@ -126,19 +154,24 @@ def _device_noun(device_rows):
     return 'devices'
 
 
-def _ha_devices(config, devices):
+def _ha_scope(agent_id, config, devices):
+    """(pinned devices, waiting entity ids) for the live HA permissions."""
     now = int(time.time())
-    rows = {}
-    for permission in ((config.get('home_assistant') or {}).get('permissions')
-                       or []):
+    by_id = {d['id']: d for d in devices}
+    pinned = {}
+    waiting = {}
+    for permission in _permission_rows(agent_id, config):
         if not _live_permission(permission, now):
             continue
-        for entity_id in _permission_entities(permission, devices):
-            entity_id = str(entity_id or '').lower()
-            if entity_id:
-                rows[entity_id] = True
-    by_id = {d['id']: d for d in devices}
-    return [by_id[e] for e in rows if e in by_id]
+        pins = _permission_pins(permission)
+        for entity_id in pins:
+            pinned[entity_id] = by_id.get(entity_id) or {
+                'id': entity_id, 'category': '', 'labels': [],
+            }
+        for entity_id in _permission_waiting(permission):
+            if entity_id not in pinned:
+                waiting[entity_id] = True
+    return [pinned[e] for e in pinned], sorted(waiting)
 
 
 def _files_parent(integration, enabled_ha):
@@ -152,10 +185,10 @@ def _files_parent(integration, enabled_ha):
     return ''
 
 
-def _tile(name, kind, total=0, run=0, ask=0, extra='', in_use=None,
-          virtual=False):
-    none = max(0, total - run - ask)
-    usable = run + ask
+def _tile(name, kind, total=0, run=0, ask=0, depends=0, frozen=0,
+          waiting=0, extra='', in_use=None, virtual=False):
+    none = max(0, total - run - ask - depends - frozen)
+    usable = total - none
     return {
         'key': name,
         'name': name,
@@ -165,8 +198,11 @@ def _tile(name, kind, total=0, run=0, ask=0, extra='', in_use=None,
         'total': total,
         'run': run,
         'ask': ask,
+        'depends': depends,
+        'frozen': frozen,
         'none': none,
         'usable': usable,
+        'waiting': waiting,
         'in_use': bool(usable) if in_use is None else bool(in_use),
         'extra': extra,
         'virtual': virtual,
@@ -178,6 +214,9 @@ def build(agent_id):
     from core import ha_devices
 
     config = get_agent_config(agent_id)
+    agent = get_agent(agent_id) or {}
+    agent['policy'] = get_agent_policy(agent_id)
+    frozen = bool(get_trigger_freeze())
     integrations = [i for i in get_integrations() if i.get('enabled')]
     enabled_ha = [i for i in integrations
                   if (i.get('kind') or '').lower() == 'ha']
@@ -192,62 +231,66 @@ def build(agent_id):
         else:
             standalone_files.append(integration)
 
+    try:
+        devices = ha_devices.devices()
+    except Exception:  # noqa: BLE001 - a summary must not fail a page
+        devices = []
+    ha_rows, waiting = _ha_scope(agent_id, config, devices)
+    noun = _device_noun(ha_rows)
+
     tiles = []
+    tool_outcomes = {}
+
+    def _count(owner, tools):
+        outcomes = []
+        for tool in tools:
+            namespaced = '%s_%s' % (
+                safe_ident(owner['name']).lower(), tool['name'])
+            decision = static_tool_decision(
+                agent, owner, tool['name'], tool, frozen=frozen)
+            tool_outcomes[namespaced] = decision['outcome']
+            outcomes.append(decision['outcome'])
+        return outcomes
+
     for integration in integrations:
         kind = (integration.get('kind') or 'custom').lower()
         if kind == 'ha_ssh' and integration not in standalone_files:
             continue
-        rows = []
-        for tool in get_tools(integration['id']):
-            if not tool.get('enabled'):
-                continue
-            namespaced = '%s_%s' % (
-                safe_ident(integration['name']).lower(), tool['name'])
-            rows.append({
-                'name': namespaced,
-                'read_only': bool(tool.get('read_only')),
-                'always_gate': bool(tool.get('always_gate')),
-            })
+        tools = [t for t in get_tools(integration['id']) if t.get('enabled')]
+        outcomes = _count(integration, tools)
         if kind == 'ha':
             for child in files_by_parent.get(integration['name'], []):
-                for tool in get_tools(child['id']):
-                    if not tool.get('enabled'):
-                        continue
-                    rows.append({
-                        'name': '%s_%s' % (
-                            safe_ident(child['name']).lower(), tool['name']),
-                        'read_only': bool(tool.get('read_only')),
-                        'always_gate': bool(tool.get('always_gate')),
-                    })
-        outcomes = [tool_outcome(row, config) for row in rows]
+                child_tools = [t for t in get_tools(child['id'])
+                               if t.get('enabled')]
+                outcomes.extend(_count(child, child_tools))
+        total = len(outcomes)
         run = outcomes.count('run')
         ask = outcomes.count('ask')
-        total = len(outcomes)
+        depends = outcomes.count('depends')
+        frozen_count = outcomes.count('frozen')
         extra = ''
         in_use = None
+        waiting_count = 0
         if kind == 'ha':
-            try:
-                devices = _ha_devices(config, ha_devices.devices())
-            except Exception:  # noqa: BLE001 - a summary must not fail a page
-                devices = []
-            noun = _device_noun(devices)
-            extra = ('%d %s run on their own' % (len(devices), noun)
-                     if devices else '')
-            in_use = bool(total or devices)
+            waiting_count = len(waiting)
+            if ha_rows:
+                extra = '%d %s run on their own' % (len(ha_rows), noun)
+            if waiting_count:
+                extra = (extra + '; ' if extra else '') + (
+                    '%d waiting to join' % waiting_count)
+            in_use = bool(total or ha_rows or waiting_count)
         tiles.append(_tile(integration['name'], kind, total, run, ask,
+                           depends, frozen_count, waiting_count,
                            extra=extra, in_use=in_use))
 
     # Unlinked Files rows are integrations too; their tools still count.
     for integration in standalone_files:
-        rows = [t for t in get_tools(integration['id']) if t.get('enabled')]
-        outcomes = [tool_outcome({
-            'name': '%s_%s' % (safe_ident(integration['name']).lower(),
-                               t['name']),
-            'read_only': bool(t.get('read_only')),
-            'always_gate': bool(t.get('always_gate')),
-        }, config) for t in rows]
-        tiles.append(_tile(integration['name'], 'ha_ssh', len(rows),
-                           outcomes.count('run'), outcomes.count('ask')))
+        tools = [t for t in get_tools(integration['id']) if t.get('enabled')]
+        outcomes = _count(integration, tools)
+        tiles.append(_tile(
+            integration['name'], 'ha_ssh', len(outcomes),
+            outcomes.count('run'), outcomes.count('ask'),
+            outcomes.count('depends'), outcomes.count('frozen')))
 
     ssh = (config.get('ssh') or {})
     hosts = ssh.get('hosts') or []
@@ -273,37 +316,61 @@ def build(agent_id):
     tools_total = sum(t['usable'] for t in tiles)
     run_total = sum(t['run'] for t in tiles)
     ask_total = sum(t['ask'] for t in tiles)
+    depends_total = sum(t['depends'] for t in tiles)
+    frozen_total = sum(t['frozen'] for t in tiles)
+    waiting_total = len(waiting)
     used = sum(1 for t in tiles if t['in_use'])
-    try:
-        devices = _ha_devices(config, ha_devices.devices())
-    except Exception:  # noqa: BLE001
-        devices = []
-    noun = _device_noun(devices)
     name = (config.get('agent') or {}).get('name') or 'This agent'
     if tools_total:
-        summary = ('%s can use %d tools in %d of %d integrations. '
-                   '%d ask you first; %d run on their own'
-                   % (name, tools_total, used, len(tiles), ask_total,
-                      run_total))
-        if devices:
-            summary += ', plus %d %s' % (len(devices), noun)
+        if frozen_total:
+            summary = ('%s has %d tools in %d of %d integrations. '
+                       '%d run on their own; %d ask you first'
+                       % (name, tools_total, used, len(tiles), run_total,
+                          ask_total))
+            if depends_total:
+                summary += '; %d depend on the call' % depends_total
+            summary += ('. Emergency Freeze is on: %d write%s paused.'
+                        % (frozen_total, '' if frozen_total == 1 else 's'))
+        else:
+            summary = ('%s can use %d tools in %d of %d integrations. '
+                       '%d ask you first; %d run on their own'
+                       % (name, tools_total, used, len(tiles), ask_total,
+                          run_total))
+            if depends_total:
+                summary += '; %d depend on the call' % depends_total
+        if ha_rows:
+            summary += ', plus %d %s' % (len(ha_rows), noun)
+        if waiting_total:
+            summary += '; %d waiting to join' % waiting_total
         summary += '.'
-    elif devices:
-        summary = ('%s has no tools switched on. It can still use %d %s '
-                   'through Home Assistant.' % (name, len(devices), noun))
+    elif ha_rows or waiting_total:
+        if ha_rows:
+            summary = ('%s has no tools switched on. It can still use %d %s '
+                       'through Home Assistant.' % (name, len(ha_rows), noun))
+        else:
+            summary = ('%s has no tools switched on. %d device%s waiting to '
+                       'join.' % (name, waiting_total,
+                                  '' if waiting_total == 1 else 's'))
+        if waiting_total and ha_rows:
+            summary += ' %d waiting to join.' % waiting_total
     else:
         summary = '%s has no tools switched on yet.' % name
     return {
         'agent': {'id': int(agent_id), 'name': name},
         'summary': summary,
+        'frozen': frozen,
+        'tool_outcomes': tool_outcomes,
         'totals': {
             'tools': tools_total,
             'run': run_total,
             'ask': ask_total,
+            'depends': depends_total,
+            'frozen': frozen_total,
             'integrations': len(tiles),
             'in_use': used,
-            'devices': len(devices),
+            'devices': len(ha_rows),
             'device_noun': noun,
+            'waiting': waiting_total,
         },
         'tiles': tiles,
     }

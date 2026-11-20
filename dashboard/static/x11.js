@@ -133,34 +133,62 @@
     return out;
   }
 
+  function globMatches(value, pattern) {
+    var re = '^' + String(pattern || '').replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*') + '$';
+    return new RegExp(re).test(String(value || ''));
+  }
+  function approvalFor(name, tool, mapping) {
+    var map = mapping || {};
+    if (Object.prototype.hasOwnProperty.call(map, name)) return map[name];
+    var ns = (tool && tool.namespace) || '';
+    if (ns && Object.prototype.hasOwnProperty.call(map, ns + '_*')) return map[ns + '_*'];
+    if (ns && Object.prototype.hasOwnProperty.call(map, ns + '.*')) return map[ns + '.*'];
+    if (Object.prototype.hasOwnProperty.call(map, '*')) return map['*'];
+    return null;
+  }
   function outcomeFor(name, tool, cfg) {
     var draft = cfg || S.draft;
     if (!draft) return 'none';
     var tools = draft.tools || {};
     var mode = tools.mode || 'all';
-    var allowed = mode !== 'allowlist' || (tools.allow || []).indexOf(name) !== -1;
+    var allowed = mode !== 'allowlist' ||
+      (tools.allow || []).some(function (p) { return globMatches(name, p); });
     if (!allowed) return 'none';
-    var approval = (tools.approval || {})[name];
-    if (approval === 'ungated') return 'run';
+    var principal = (tool && tool.principal_allow) || [];
+    if (principal.length) {
+      var who = String((S.agent && S.agent.name) || '').toLowerCase();
+      if (principal.map(function (p) { return String(p).toLowerCase(); }).indexOf(who) === -1) {
+        return 'none';
+      }
+    }
+    if (tool && tool.read_only) return 'run';
+    if (S.summary && S.summary.frozen) return 'frozen';
+    var approval = approvalFor(name, tool, tools.approval);
+    if (tool && tool.always_gate) return 'ask';
     if (approval === 'gated') return 'ask';
-    return tool && tool.read_only ? 'run' : 'ask';
+    if (approval === 'ungated') return 'run';
+    var gate = String((tool && tool.gate_mode) || 'destructive').toLowerCase();
+    if (gate === 'all') return 'ask';
+    if (gate === 'destructive') return 'depends';
+    return 'run';
   }
 
   function countsFor(cfg, integrations) {
     var draft = cfg || S.draft;
     var tools = toolList(integrations);
-    var total = tools.length;
-    if ((draft.tools || {}).mode === 'allowlist') {
-      var allowed = (draft.tools || {}).allow || [];
-      total = tools.filter(function (t) { return allowed.indexOf(t.name) !== -1; }).length;
-    }
-    var ask = 0, run = 0;
+    var total = 0, ask = 0, run = 0, depends = 0, frozen = 0;
     tools.forEach(function (t) {
       var o = outcomeFor(t.name, t, draft);
+      if (o === 'none') return;
+      total += 1;
       if (o === 'ask') ask += 1;
       else if (o === 'run') run += 1;
+      else if (o === 'depends') depends += 1;
+      else if (o === 'frozen') frozen += 1;
     });
-    return { total: total, ask: ask, run: run };
+    return { total: total, ask: ask, run: run, depends: depends,
+      frozen: frozen };
   }
 
   function permissions(cfg) {
@@ -278,6 +306,8 @@
     var c = countsFor(cfg, integrations);
     if (!c.total) return 'No tools yet';
     var parts = [c.run + ' tools run without asking', c.ask + ' ask first'];
+    if (c.depends) parts.push(c.depends + ' depend on the call');
+    if (c.frozen) parts.push(c.frozen + ' frozen');
     parts = parts.concat(deviceSummaryFor(cfg));
     parts.push('SSH ' + sshText(cfg));
     return parts.join(' \u00b7 ');
@@ -316,8 +346,34 @@
     var text = (service || '').replace(/_/g, ' ');
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
+  function pinnedIdsFor(p) {
+    if (p.label_id) {
+      var row = allowanceRowFor(p);
+      if (row) {
+        try {
+          var pins = JSON.parse(row.entities_json || '[]');
+          return pins.map(function (x) { return x.entity_id || x; }).filter(Boolean);
+        } catch (e) { /* fall through to the label */ }
+      }
+      return labelMembers(p.label_id, p.domain).map(function (d) { return d.id; });
+    }
+    return (p.entities || []).map(String);
+  }
+  function waitingIdsFor(p) {
+    var row = p.label_id ? allowanceRowFor(p) : null;
+    if (!row) return [];
+    try {
+      return JSON.parse(row.pending_json || '[]')
+        .map(function (x) { return x.entity_id || x; }).filter(Boolean);
+    } catch (e) { return []; }
+  }
   function permDevices(p) {
-    if (p.label_id) return 'label \u201c' + labelName(p.label_id) + '\u201d (' + labelMembers(p.label_id, p.domain).length + ')';
+    if (p.label_id) {
+      var pinned = pinnedIdsFor(p);
+      var waiting = waitingIdsFor(p).filter(function (id) { return pinned.indexOf(id) === -1; });
+      return 'label \u201c' + labelName(p.label_id) + '\u201d (' + pinned.length +
+        (waiting.length ? ' pinned, ' + waiting.length + ' waiting' : '') + ')';
+    }
     var ids = p.entities || [];
     var names = ids.slice(0, 4).map(deviceName);
     if (ids.length > 4) names.push('+' + (ids.length - 4) + ' more');
@@ -338,7 +394,8 @@
       var d = (cond.domain && cond.domain['in'] && cond.domain['in'][0]) || '';
       var sv = (cond.service && cond.service['in'] && cond.service['in'][0]) || '';
       if (Number(r.agent_id) === Number(S.agent && S.agent.id) &&
-          d === p.domain && sv === p.service && !Number(r.revoked_at)) return r;
+          d === p.domain && sv === p.service && !Number(r.revoked_at) &&
+          (p.label_id ? r.source_label_id === p.label_id : !r.source_label_id)) return r;
     }
     return null;
   }
@@ -876,6 +933,12 @@
     { key: 'climate', group: 'Things it can switch', label: 'Heating and climate', category: 'climate' },
     { key: 'fan', group: 'Things it can switch', label: 'Fans', category: 'fan' },
     { key: 'media', group: 'Things it can switch', label: 'Media players', category: 'media' },
+    { key: 'lock', group: 'Things it can switch', label: 'Locks', category: 'lock' },
+    { key: 'valve', group: 'Things it can switch', label: 'Valves', category: 'valve' },
+    { key: 'button', group: 'Things it can run', label: 'Buttons', category: 'button' },
+    { key: 'scene', group: 'Things it can run', label: 'Scenes', category: 'scene' },
+    { key: 'script', group: 'Things it can run', label: 'Scripts', category: 'script' },
+    { key: 'vacuum', group: 'Things it can run', label: 'Vacuums', category: 'vacuum' },
     { key: 'temperature', group: 'Things it can read', label: 'Temperature', sensor: 'temperature' },
     { key: 'humidity', group: 'Things it can read', label: 'Humidity', sensor: 'humidity' },
     { key: 'motion', group: 'Things it can read', label: 'Motion', sensor: 'motion' },
@@ -1298,8 +1361,11 @@
       return '<a class="x11-ledger-row" href="' + attr(tileHref(t)) + '" data-ledger="' + attr(t.name) + '">' +
         '<span class="x11-ledger-name"><span class="x11-tile-mark" aria-hidden="true">' + esc(t.mark) + '</span>' +
         '<span><b>' + esc(t.name) + '</b><span class="x11-ledger-kind">' + esc(t.kind_words) + '</span></span></span>' +
-        '<span class="x11-ledger-bar">' + accessBar(t.run, t.ask, t.none, tileBarLabel(t)) + '</span>' +
-        '<span class="x11-ledger-count">' + t.run + ' run \u00b7 ' + t.ask + ' ask</span>' +
+        '<span class="x11-ledger-bar">' + accessBar(t.run, t.ask, t.none, tileBarLabel(t), t.depends, t.frozen) + '</span>' +
+        '<span class="x11-ledger-count">' + t.run + ' run \u00b7 ' + t.ask + ' ask' +
+        (t.depends ? ' \u00b7 ' + t.depends +
+          (t.depends === 1 ? ' depends' : ' depend') + ' on the call' : '') +
+        (t.frozen ? ' \u00b7 ' + t.frozen + ' frozen' : '') + '</span>' +
         (t.extra ? '<span class="x11-ledger-extra">' + esc(t.extra) + '</span>' : '') + '</a>';
     }).join('');
     var permCards = perms.filter(function (p) { return !p.suspended_at; })
@@ -1475,7 +1541,18 @@
       return cfg && typeof cfg === 'object' ? cfg : {};
     } catch (e) { return {}; }
   }
+  function decorateToolGroups(groups) {
+    (groups || []).forEach(function (g) {
+      var ns = String(g.integration || '').replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+      (g.tools || []).forEach(function (t) {
+        t.gate_mode = g.gate_mode || 'destructive';
+        t.namespace = ns;
+        t.principal_allow = t.principal_allow || [];
+      });
+    });
+  }
   function mergeHATools(groups, integrations) {
+    decorateToolGroups(groups);
     var has = (integrations || []).filter(function (i) {
       return i.kind === 'ha' && i.enabled;
     });
@@ -1547,11 +1624,7 @@
     return !expires || expires * 1000 > Date.now();
   }
   function permissionEntities(p) {
-    if (p.label_id) {
-      return (S.devices || []).filter(function (d) {
-        return (d.labels || []).some(function (l) { return l.id === p.label_id; });
-      }).map(function (d) { return d.id; });
-    }
+    if (p.label_id) return pinnedIdsFor(p);
     return (p.entities || []).map(String);
   }
   function coveredDeviceRows() {
@@ -1575,14 +1648,16 @@
     var out = [];
     (S.tools || []).forEach(function (g) {
       var tools = toolsOf(g);
-      var run = 0, ask = 0;
+      var run = 0, ask = 0, depends = 0, frozen = 0;
       tools.forEach(function (tool) {
         var o = outcomeFor(tool.name, tool, S.draft);
         if (o === 'run') run += 1;
         else if (o === 'ask') ask += 1;
+        else if (o === 'depends') depends += 1;
+        else if (o === 'frozen') frozen += 1;
       });
       var extra = '';
-      var inUse = run + ask > 0;
+      var inUse = run + ask + depends + frozen > 0;
       var devices = [];
       if (g.kind === 'ha') {
         devices = coveredDeviceRows();
@@ -1593,7 +1668,9 @@
         key: g.integration, name: g.integration, kind: g.kind,
         kind_words: kindWords(g.kind), mark: markFor(g.integration, g.kind),
         total: tools.length, run: run, ask: ask,
-        none: Math.max(0, tools.length - run - ask), usable: run + ask,
+        depends: depends, frozen: frozen,
+        none: Math.max(0, tools.length - run - ask - depends - frozen),
+        usable: tools.length - Math.max(0, tools.length - run - ask - depends - frozen),
         in_use: inUse, extra: extra, virtual: false,
       });
     });
@@ -1602,15 +1679,16 @@
     var sshRun = hosts.length && ssh.mode === 'normal' ? 1 : 0;
     var sshAsk = hosts.length && ssh.mode !== 'normal' ? 1 : 0;
     out.push({ key: 'SSH', name: 'SSH', kind: 'ssh', kind_words: 'SSH',
-      mark: 'SS', total: 1, run: sshRun, ask: sshAsk, none: 1 - sshRun - sshAsk,
-      usable: sshRun + sshAsk, in_use: !!hosts.length, virtual: true,
+      mark: 'SS', total: 1, run: sshRun, ask: sshAsk, depends: 0, frozen: 0,
+      none: 1 - sshRun - sshAsk, usable: sshRun + sshAsk,
+      in_use: !!hosts.length, virtual: true,
       extra: hosts.length === 1 && hosts[0] === '*' ? 'Any gateway'
         : (hosts.length ? hosts.length + ' hosts' : 'No hosts yet') });
     var web = (S.draft.websites || {});
     var sites = (web.allow || []).length;
     out.push({ key: 'Websites', name: 'Websites', kind: 'websites',
       kind_words: 'Web', mark: 'WB', total: 1,
-      run: web.enabled && sites ? 1 : 0, ask: 0,
+      run: web.enabled && sites ? 1 : 0, ask: 0, depends: 0, frozen: 0,
       none: web.enabled && sites ? 0 : 1,
       usable: web.enabled && sites ? 1 : 0, in_use: !!web.enabled,
       virtual: true,
@@ -1624,9 +1702,10 @@
   function currentSummary(tiles) {
     if (!tiles && S.summary && S.summary.summary && !isDirty()) return S.summary.summary;
     var list = tiles || currentTiles();
-    var tools = 0, run = 0, ask = 0, used = 0;
+    var tools = 0, run = 0, ask = 0, depends = 0, frozen = 0, used = 0;
     list.forEach(function (t) {
       tools += t.usable; run += t.run; ask += t.ask;
+      depends += t.depends || 0; frozen += t.frozen || 0;
       if (t.in_use) used += 1;
     });
     var devices = coveredDeviceRows();
@@ -1636,10 +1715,12 @@
         devices.length + ' ' + deviceNoun(devices) + ' through Home Assistant.';
       return name + ' has no tools switched on yet.';
     }
-    var text = name + ' can use ' + tools + ' tools in ' + used + ' of ' +
-      list.length + ' integrations. ' + ask + ' ask you first; ' + run +
-      ' run on their own';
+    var text = name + (frozen ? ' has ' : ' can use ') + tools + ' tools in ' +
+      used + ' of ' + list.length + ' integrations. ' + ask + ' ask you first; ' +
+      run + ' run on their own';
+    if (depends) text += '; ' + depends + ' depend on the call';
     if (devices.length) text += ', plus ' + devices.length + ' ' + deviceNoun(devices);
+    if (frozen) text += '. Emergency Freeze is on: ' + frozen + ' writes are paused';
     return text + '.';
   }
   function kindWords(kind) {
@@ -1658,8 +1739,9 @@
     var letters = String(name || '').replace(/[^A-Za-z0-9]/g, '');
     return (letters.slice(0, 2) || kind || '??').toUpperCase();
   }
-  function accessBar(run, ask, none, label) {
-    var total = run + ask + none;
+  function accessBar(run, ask, none, label, depends, frozen) {
+    depends = depends || 0; frozen = frozen || 0;
+    var total = run + ask + none + depends + frozen;
     if (!total) {
       return '<span class="x11-accessbar x11-accessbar-empty" role="img" aria-label="' +
         attr(label || 'No tools') + '"><span class="x11-ab-none" style="flex:1"></span></span>';
@@ -1667,13 +1749,18 @@
     return '<span class="x11-accessbar" role="img" aria-label="' + attr(label) + '">' +
       (run ? '<span class="x11-ab-run" style="flex:' + run + '"></span>' : '') +
       (ask ? '<span class="x11-ab-ask" style="flex:' + ask + '"></span>' : '') +
+      (depends ? '<span class="x11-ab-depends" style="flex:' + depends + '"></span>' : '') +
+      (frozen ? '<span class="x11-ab-frozen" style="flex:' + frozen + '"></span>' : '') +
       (none ? '<span class="x11-ab-none" style="flex:' + none + '"></span>' : '') +
       '</span>';
   }
   function tileBarLabel(t) {
     if (!t.total) return t.name + ': no tools';
-    return t.run + ' of ' + t.total + ' tools run on their own, ' + t.ask +
-      ' ask you first, ' + t.none + ' not allowed';
+    var label = t.run + ' of ' + t.total + ' tools run on their own, ' + t.ask +
+      ' ask you first';
+    if (t.depends) label += ', ' + t.depends + ' depend on the call';
+    if (t.frozen) label += ', ' + t.frozen + ' frozen';
+    return label + ', ' + t.none + ' not allowed';
   }
   function tileHref(t) {
     return '#agent/' + Number(S.agent.id) + '/tools/' + encodeURIComponent(t.name);
@@ -1686,16 +1773,24 @@
       esc(t.mark) + '</span><span class="x11-tile-kind">' + esc(t.kind_words) + '</span></span>' +
       '<span class="x11-tile-name">' + esc(t.name) + '</span>' +
       '<span class="x11-tile-counts"><b>' + t.usable + '</b> of <b>' + t.total + '</b> tools</span>' +
-      '<span class="x11-tile-outcomes">' + t.run + ' run \u00b7 ' + t.ask + ' ask</span>' +
-      accessBar(t.run, t.ask, t.none, tileBarLabel(t)) +
+      '<span class="x11-tile-outcomes">' + t.run + ' run \u00b7 ' + t.ask + ' ask' +
+      (t.depends ? ' \u00b7 ' + t.depends +
+        (t.depends === 1 ? ' depends' : ' depend') + ' on the call' : '') +
+      (t.frozen ? ' \u00b7 ' + t.frozen + ' frozen' : '') + '</span>' +
+      accessBar(t.run, t.ask, t.none, tileBarLabel(t), t.depends, t.frozen) +
       (t.extra ? '<span class="x11-tile-extra">' + esc(t.extra) + '</span>' : '') +
       '</a>';
   }
   function legendHtml() {
-    return '<div class="x11-legend" aria-label="Access bar legend">' +
+    var legend = '<div class="x11-legend" aria-label="Access bar legend">' +
       '<span>' + accessBar(1, 0, 0, 'Runs on its own') + ' Runs on its own</span>' +
       '<span>' + accessBar(0, 1, 0, 'Asks you first') + ' Asks you first</span>' +
-      '<span>' + accessBar(0, 0, 1, 'Not allowed') + ' Not allowed</span></div>';
+      '<span>' + accessBar(0, 0, 0, 'Depends on the call', 1) + ' Depends on the call</span>' +
+      '<span>' + accessBar(0, 0, 1, 'Not allowed') + ' Not allowed</span>';
+    if (S.summary && S.summary.frozen) {
+      legend += '<span>' + accessBar(0, 0, 0, 'Frozen', 0, 1) + ' Frozen</span>';
+    }
+    return legend + '</div>';
   }
   function sectionTools() {
     var tiles = currentTiles();
@@ -1754,7 +1849,8 @@
   }
   function toolStateLabel(outcome) {
     return ({ none: 'Not allowed', ask: 'Asks you first',
-      run: 'Runs on its own' })[outcome] || 'Not allowed';
+      run: 'Runs on its own', depends: 'Depends on the call',
+      frozen: 'Frozen' })[outcome] || 'Not allowed';
   }
   function integrationTools(group) {
     if (!group) return [];
@@ -1767,7 +1863,7 @@
     var total = tools.length;
     var used = tools.filter(function (t) {
       var o = outcomeFor(t.name, t, S.draft);
-      return o === 'run' || o === 'ask';
+      return o === 'run' || o === 'ask' || o === 'depends' || o === 'frozen';
     }).length;
     var changing = tools.filter(function (t) { return !t.read_only; });
     var text = used + ' of ' + total + ' tool' + (total === 1 ? '' : 's');
@@ -1805,7 +1901,14 @@
         ? 'Reads a file on the add-on. Nothing changes.'
         : 'Writes always ask you. This tool is always approval-gated.') + '</div>';
     }
+    if (outcome === 'depends') {
+      note += '<div class="x11-depends-line">Depends on the call. Eshu checks the method and path when the agent calls it.</div>';
+    }
+    if (outcome === 'frozen') {
+      note += '<div class="x11-frozen-line">Frozen. Emergency Freeze pauses writes; reads still run.</div>';
+    }
     return '<div class="x11-tool-row" data-tool-row="' + attr(tool.name) + '"' +
+      ' data-tool-outcome="' + attr(outcome) + '"' +
       (tool.always_gate ? ' data-always-gate="1"' : '') + '>' +
       '<div><div class="x11-tool-name">' + esc(toolTitle(tool)) + '</div>' +
       toolDescription(tool) + note + '</div>' +

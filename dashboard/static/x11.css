@@ -444,6 +444,24 @@
   min-width: 3px;
 }
 #x11-root .x11-ab-none { background: var(--bg-base); min-width: 3px; }
+#x11-root .x11-ab-depends {
+  background: repeating-linear-gradient(-45deg, transparent 0 3px,
+    var(--text-muted) 3px 4px);
+  border-left: 1px solid var(--rule); border-right: 1px solid var(--rule);
+  min-width: 3px;
+}
+#x11-root .x11-ab-frozen {
+  background: repeating-linear-gradient(90deg, var(--rule) 0 2px,
+    transparent 2px 5px);
+  border-left: 1px solid var(--rule); border-right: 1px solid var(--rule);
+  min-width: 3px;
+}
+#x11-root .x11-depends-line,
+#x11-root .x11-frozen-line {
+  color: var(--text-muted); font-size: var(--text-xs); margin-top: 4px;
+  max-width: 76ch;
+}
+#x11-root .x11-frozen-line { color: var(--accent); }
 #x11-root .x11-legend {
   display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
   margin: 12px 0 0; color: var(--text-muted); font-size: var(--text-xs);

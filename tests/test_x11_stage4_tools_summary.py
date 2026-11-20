@@ -72,21 +72,70 @@ def _allowance(agent_id, monkeypatch):
         ['switch.lamp'], rate_per_hour=30)
 
 
-def test_outcome_defaults_and_overrides():
-    config = {'tools': {'mode': 'all', 'allow': [], 'approval': {}}}
-    read = {'name': 'ha_get', 'read_only': True, 'always_gate': False}
-    write = {'name': 'ha_call', 'read_only': False, 'always_gate': False}
-    assert summary.tool_outcome(read, config) == 'run'
-    assert summary.tool_outcome(write, config) == 'ask'
-    config['tools']['approval'] = {'ha_get': 'gated', 'ha_call': 'ungated'}
-    assert summary.tool_outcome(read, config) == 'ask'
-    assert summary.tool_outcome(write, config) == 'run'
-    always = {'name': 'ha_call', 'read_only': False, 'always_gate': True}
-    config['tools']['approval'] = {'ha_call': 'ungated'}
-    assert summary.tool_outcome(always, config) == 'ask'
-    config['tools']['mode'] = 'allowlist'
-    config['tools']['allow'] = ['ha_get']
-    assert summary.tool_outcome(write, config) == 'none'
+def _custom(gate_mode='destructive', principal_allow=None):
+    integration_id = integrations.create_integration(
+        'Custom', 'http://192.0.2.80/api', 'none', '', kind='custom',
+        gate_mode=gate_mode)
+    integrations.create_tool(
+        integration_id, 'look', 'Look', 'GET', '/x', [], '{}', read_only=True,
+        principal_allow=principal_allow or [])
+    integrations.create_tool(
+        integration_id, 'change', 'Change', 'POST', '/x', [], '{}',
+        read_only=False, principal_allow=principal_allow or [])
+    return integrations.get_integration('Custom')
+
+
+def _policy(agent_id, **kw):
+    agent_policies.set_agent_policy(agent_id, **kw)
+    return agent_id
+
+
+def test_wildcard_allowlist_and_approval_fallback(monkeypatch):
+    agent_id = _policy(_agent(), tools_mode='allowlist', tools=['custom_*'],
+                       approval={'*': 'ungated'})
+    _custom()
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']['custom_look'] == 'run'
+    assert payload['tool_outcomes']['custom_change'] == 'run'
+    _policy(agent_id, tools_mode='allowlist', tools=['custom_*'],
+            approval={'*': 'gated'})
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']['custom_change'] == 'ask'
+    _policy(agent_id, tools_mode='allowlist', tools=['other_*'])
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']['custom_look'] == 'none'
+    assert payload['tool_outcomes']['custom_change'] == 'none'
+
+
+@pytest.mark.parametrize('gate_mode, expected', [
+    ('all', 'ask'), ('destructive', 'depends'), ('none', 'run')])
+def test_gate_mode_is_the_real_rule(monkeypatch, gate_mode, expected):
+    agent_id = _agent()
+    _custom(gate_mode=gate_mode)
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']['custom_look'] == 'run'
+    assert payload['tool_outcomes']['custom_change'] == expected
+
+
+def test_a_principal_allowlist_that_excludes_the_agent_is_none(monkeypatch):
+    agent_id = _agent()
+    _custom(principal_allow=['someone-else'])
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']['custom_look'] == 'none'
+    assert payload['tool_outcomes']['custom_change'] == 'none'
+
+
+def test_freeze_is_shown_and_reads_still_run(monkeypatch):
+    agent_id = _agent()
+    _custom()
+    monkeypatch.setattr(summary, 'get_trigger_freeze', lambda: True)
+    payload = summary.build(agent_id)
+    assert payload['frozen'] is True
+    assert payload['tool_outcomes']['custom_look'] == 'run'
+    assert payload['tool_outcomes']['custom_change'] == 'frozen'
+    assert payload['totals']['frozen'] == 1
+    assert payload['totals']['run'] == 1
+    assert 'Emergency Freeze is on' in payload['summary']
 
 
 def test_summary_and_tiles_use_one_counting_rule(monkeypatch):
@@ -142,8 +191,9 @@ def test_allowlist_and_explicit_approval_change_the_same_totals(monkeypatch):
 
     payload = summary.build(agent_id)
     assert payload['totals']['tools'] == 4
-    assert payload['totals']['ask'] == 2   # get_config gated; call_service always
-    assert payload['totals']['run'] == 2   # files list, series
+    # A gated override does not affect a read; call_service is always gated.
+    assert payload['totals']['ask'] == 1
+    assert payload['totals']['run'] == 3
     assert payload['totals']['in_use'] == 2
     assert 'can use 4 tools in 2 of 4 integrations' in payload['summary']
     assert payload['totals']['tools'] == sum(
@@ -228,3 +278,79 @@ def test_seed_labels_reach_available_tools(auth_client):
     wanted = [t for t in sonarr['tools'] if t['tool'] == 'wanted_missing'][0]
     assert wanted['label'] == 'Missing episodes'
     assert isinstance(wanted['params'], list) and wanted['params']
+
+
+def test_every_seeded_tool_matches_the_shared_decision(monkeypatch):
+    from core import seeds
+    from core.agent_policy import static_tool_decision
+
+    agent_id = _agent()
+    for kind in seeds.SEEDERS:
+        integration_id = integrations.create_integration(
+            'seed-' + kind, 'http://192.0.2.90/' + kind, 'none', '',
+            kind=kind)
+        integration = integrations.get_integration_by_id(integration_id)
+        seeds.seed_for_kind(integration)
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [])
+    agent = agent_tokens.get_agent(agent_id)
+    agent['policy'] = agent_policies.get_agent_policy(agent_id)
+    payload = summary.build(agent_id)
+    assert payload['tool_outcomes']
+    from core.agent_policy import safe_ident
+    owners = {safe_ident(i['name']).lower(): i
+              for i in integrations.get_integrations()}
+    for name, outcome in payload['tool_outcomes'].items():
+        key = next(key for key in sorted(owners, key=len, reverse=True)
+                   if name.startswith(key + '_'))
+        owner = owners[key]
+        tool_name = name[len(key) + 1:]
+        tool = integrations.get_tool(owner['name'], tool_name)
+        expected = static_tool_decision(
+            agent, owner, tool_name, tool)['outcome']
+        assert outcome == expected, (name, outcome, expected)
+
+
+def test_label_scope_counts_pins_and_waiting_separately(monkeypatch):
+    agent_id = _agent()
+    monkeypatch.setattr('core.ha_devices.devices', lambda: _devices())
+    monkeypatch.setattr(allowances, '_ha_registry', lambda: {
+        'switch.kettle': {'id': 'reg-kettle', 'name': 'Kettle'},
+        'switch.lamp': {'id': 'reg-lamp', 'name': 'Lamp'},
+    })
+    monkeypatch.setattr(allowances, '_risky_classes', lambda entities: [])
+    allowances.ensure_initialised()
+    row = allowances.create_allowance(
+        'test', agent_id, 'Plugs', 'switch', 'turn_off', ['switch.kettle'],
+        rate_per_hour=30, source_label_id='lbl-plugs')
+    from db.core import db_conn
+    with db_conn() as conn:
+        conn.execute(
+            'UPDATE allowances SET pending_json = ? WHERE id = ?',
+            (json.dumps([{'entity_id': 'switch.lamp',
+                          'registry_id': 'reg-lamp'}]), row['id']))
+        conn.commit()
+    payload = summary.build(agent_id)
+    assert payload['totals']['devices'] == 1
+    assert payload['totals']['waiting'] == 1
+    ha = [t for t in payload['tiles'] if t['name'] == 'Home Assistant']
+    assert ha == []  # no HA integration in this test
+    assert 'waiting to join' in payload['summary'] or payload['totals']['waiting'] == 1
+
+
+def test_a_non_useful_pinned_device_still_counts(monkeypatch):
+    agent_id = _agent()
+    hidden = {'id': 'switch.hidden', 'name': 'Hidden plug',
+              'area': 'Utility', 'domain': 'switch', 'category': 'switch',
+              'sensor_kind': '', 'useful': False, 'labels': [],
+              'state': 'off', 'unit': ''}
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [hidden])
+    monkeypatch.setattr(allowances, '_ha_registry', lambda: {
+        'switch.hidden': {'id': 'reg-hidden', 'name': 'Hidden plug'}})
+    monkeypatch.setattr(allowances, '_risky_classes', lambda entities: [])
+    allowances.ensure_initialised()
+    allowances.create_allowance(
+        'test', agent_id, 'Hidden plug', 'switch', 'turn_off',
+        ['switch.hidden'], rate_per_hour=30)
+    payload = summary.build(agent_id)
+    # `useful` is a picker default, never the permission's scope.
+    assert payload['totals']['devices'] == 1

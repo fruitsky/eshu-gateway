@@ -31,6 +31,12 @@ def _attrs(**over):
     ('media_player.tv', 'media'),
     ('sensor.temperature', 'sensor'),
     ('binary_sensor.motion', 'sensor'),
+    ('lock.front_door', 'lock'),
+    ('valve.water', 'valve'),
+    ('button.doorbell', 'button'),
+    ('scene.movie', 'scene'),
+    ('script.goodnight', 'script'),
+    ('vacuum.robot', 'vacuum'),
 ])
 def test_each_category(entity_id, expected):
     assert classify_entity(entity_id, _reg(), _attrs())['category'] == expected
@@ -83,16 +89,26 @@ def test_entity_category_wins_over_name_suffix():
 def test_ordinary_devices_are_useful():
     for entity_id in ('switch.plug', 'light.ceiling', 'cover.garage',
                       'climate.hall', 'fan.bedroom', 'media_player.tv',
-                      'sensor.outside', 'binary_sensor.motion'):
+                      'sensor.outside', 'binary_sensor.motion',
+                      'lock.front_door', 'valve.water', 'button.doorbell',
+                      'scene.movie', 'script.goodnight', 'vacuum.robot'):
         assert classify_entity(entity_id, _reg(name='Thing'), _attrs(),
                                'demo')['useful'] is True
 
 
 def test_unknown_domain_is_not_useful():
-    row = classify_entity('lock.front_door', _reg(name='Front door'),
+    row = classify_entity('remote.hall', _reg(name='Hall remote'),
                           _attrs(), 'demo')
     assert row['category'] == ''
     assert row['useful'] is False
+
+
+def test_a_risky_device_is_useful_even_when_marked_as_a_setting():
+    row = classify_entity(
+        'cover.garage', _reg(name='Garage door', entity_category='config'),
+        _attrs(device_class='garage'), 'demo')
+    assert row['risky'] is True
+    assert row['useful'] is True
 
 
 def test_helper_domain_is_hidden_even_though_it_maps_to_switch():

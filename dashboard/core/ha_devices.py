@@ -35,6 +35,12 @@ CATEGORY_BY_DOMAIN = {
     'media_player': 'media',
     'sensor': 'sensor',
     'binary_sensor': 'sensor',
+    'lock': 'lock',
+    'valve': 'valve',
+    'button': 'button',
+    'scene': 'scene',
+    'script': 'script',
+    'vacuum': 'vacuum',
 }
 
 # Add-on and system integrations whose entities are plumbing, not devices the
@@ -135,11 +141,16 @@ def classify_entity(entity_id, reg=None, attrs=None, platform=''):
     category = CATEGORY_BY_DOMAIN.get(domain, '')
     sensor_kind = _sensor_kind(reg, attrs) if category == 'sensor' else ''
     reason = _hidden_reason(entity_id, reg, platform)
-    useful = bool(category) and not reason
+    risky = str(reg.get('device_class') or
+                attrs.get('device_class') or '').lower() in _RISKY_CLASSES
+    # A risky device is always visible: a lock or garage door is exactly what
+    # the operator must see, even if a registry marks it as a setting.
+    useful = bool(category) and (not reason or risky)
     return {
         'category': category,
         'sensor_kind': sensor_kind,
         'useful': useful,
+        'risky': risky,
     }
 
 
@@ -203,6 +214,7 @@ def _build(integration):
                 label_ids.append(lid)
         platform = str(reg.get('platform') or '')
         classified = classify_entity(ent, reg, attrs, platform)
+        risky = str(attrs.get('device_class') or '').lower() in _RISKY_CLASSES
         out.append({
             'id': ent,
             'name': _entity_name(reg, state),
@@ -219,8 +231,7 @@ def _build(integration):
             'useful': classified['useful'],
             'settings_entity': bool(reg.get('entity_category')),
             'disabled': bool(reg.get('disabled_by')),
-            'risky': str(attrs.get('device_class') or '').lower()
-                     in _RISKY_CLASSES,
+            'risky': risky,
             'protected': ent in protected,
         })
     out.sort(key=lambda d: (d['area'].lower(), d['name'].lower(), d['id']))

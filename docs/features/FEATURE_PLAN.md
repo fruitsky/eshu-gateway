@@ -23190,3 +23190,25 @@ Nits:
    It counts waiting joiners that are not pinned yet and ignores time
    windows. Both overstate, which is the safe direction. Counting the
    pinned `entities_json` would make it exact.
+
+### CB15 and the nits implemented (`feat/x11-stage4`)
+
+* **One static decision.** `core.agent_policy.static_tool_decision` now owns
+  the request-independent gate: the `fnmatch` allowlist, `principal_allow`,
+  the `approval_mode` fallback (`exact`, `ns_*`, `ns.*`, `*`), `always_gate`,
+  `gate_mode` and the freeze. `_run_tool` calls it for the freeze and the
+  gate; the summary calls the same function for every enabled tool.
+* **Depends.** A write under `gate_mode: destructive` is neither a run nor an
+  ask until the request is known. The server returns `depends`, the tile and
+  row say "Depends on the call", and the access bar has its own style. It is
+  not counted in `run` or `ask`.
+* **Frozen.** With Emergency Freeze on, writes are `frozen` (reads still
+  run); the summary sentence, legend and rows say so.
+* **Devices.** `lock`, `valve`, `button`, `scene`, `script` and `vacuum` are
+  categories, and a risky device is useful even when a registry marks it as a
+  setting. The summary counts the permission's pinned devices and lists
+  waiting joiners separately, not the label's current membership.
+* **Coverage.** The summary tests cover wildcard allowlists, the `*` approval
+  fallback, all three gate modes, `principal_allow`, freeze, and every seeded
+  tool against the shared decision. The browser check covers a destructive
+  generic write, the Locks filter and the freeze state.

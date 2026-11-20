@@ -83,6 +83,21 @@ async function scrollMain(page, bottom) {
       }
     }
   }
+  // One seeded custom integration gives a generic `write` with the default
+  // destructive gate: its row must say "Depends on the call", not "Asks".
+  const generic = await page.context().request.post(BASE + 'api/integrations', {
+    data: { name: 'Generic lab', base_url: 'http://192.0.2.72',
+      auth_type: 'none', kind: 'custom' },
+    headers: { 'X-Eshu-CSRF': '1' } });
+  if (!generic.ok()) {
+    const body = await generic.json().catch(() => ({}));
+    if (!/already exists/.test(String(body.detail || ''))) {
+      throw new Error('could not create Generic lab: HTTP ' + generic.status());
+    }
+  }
+  await page.context().request.post(
+    BASE + 'api/integrations/Generic%20lab/seed',
+    { headers: { 'X-Eshu-CSRF': '1' } });
   await page.goto(BASE, { waitUntil: 'networkidle' });
   const aid = await openFirstAgent(page);
 
@@ -210,6 +225,14 @@ async function scrollMain(page, bottom) {
   await page.evaluate(() => x11Discard());
   await page.waitForTimeout(300);
 
+  // 6b. A generic write under the default destructive gate depends on the
+  // call; it is neither counted as a run nor as an ask.
+  await gotoHash(page, '#agent/' + aid + '/tools/Generic%20lab');
+  await page.waitForTimeout(700);
+  ok(await page.locator('[data-tool-row="generic_lab_write"][data-tool-outcome="depends"]').count() === 1 &&
+     /Depends on the call/.test(await page.locator('[data-tool-row="generic_lab_write"] .x11-depends-line').textContent()),
+     'integration: a destructive-gate write does not say Depends on the call');
+
   // 7. Back to Tools, then the Home Assistant page with four tabs.
   await gotoHash(page, '#agent/' + aid + '/tools');
   ok(await page.locator('[data-x11-section="tools"]').count() === 1,
@@ -232,6 +255,14 @@ async function scrollMain(page, bottom) {
      'devices: filter rail is missing');
   ok(await page.locator('[data-device-filter="switch"][aria-pressed="true"]').count() >= 1,
      'devices: the default filter is not Plugs and switches');
+  ok(await page.locator('[data-device-filter="lock"]').count() >= 1,
+     'devices: the Locks filter is missing');
+  await page.locator('[data-device-filter="lock"]').first().click();
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device-row="lock.front_door"]').count() === 1,
+     'devices: a lock is not visible under its filter');
+  await page.locator('[data-device-filter="switch"]').first().click();
+  await page.waitForTimeout(400);
   ok(/settings, diagnostic and helper entities are hidden/.test(
        await page.locator('[data-hidden-line]').textContent()),
      'devices: hidden line is missing');
@@ -408,6 +439,30 @@ async function scrollMain(page, bottom) {
   await page.locator('#x11-json-doc').fill('{"schema_version":1}');
   await page.waitForTimeout(200);
   ok(await page.locator('#x11-json-apply').isDisabled(), 'JSON: Apply stayed enabled after an edit');
+
+  // 16b. Emergency Freeze is visible on the summary and on a write row.
+  const frozen = await page.evaluate(async () => {
+    const r = await fetch('/api/freeze', { method: 'POST',
+      headers: { 'X-Eshu-CSRF': '1' } });
+    return r.status;
+  });
+  ok(frozen === 200, 'freeze: could not turn the freeze on');
+  await gotoHash(page, '#agent/' + aid + '/tools');
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(1000);
+  ok(/Emergency Freeze/.test(await page.locator('#x11-tools-summary').textContent()),
+     'freeze: the summary does not say the freeze is on');
+  ok(/Frozen/.test(await page.locator('.x11-legend').textContent()),
+     'freeze: the legend has no Frozen state');
+  await gotoHash(page, '#agent/' + aid + '/tools/Generic%20lab');
+  await page.waitForTimeout(600);
+  ok(await page.locator('[data-tool-row="generic_lab_write"][data-tool-outcome="frozen"]').count() === 1 &&
+     /Frozen/.test(await page.locator('[data-tool-row="generic_lab_write"] .x11-frozen-line').textContent()),
+     'freeze: a write row does not show Frozen');
+  await page.evaluate(async () => {
+    await fetch('/api/unfreeze', { method: 'POST',
+      headers: { 'X-Eshu-CSRF': '1' } });
+  });
 
   ok(errors.length === 0, 'browser errors: ' + errors.slice(0, 4).join(' | '));
 

@@ -4510,6 +4510,7 @@ def available_agent_tools(agent_id: int, request: Request):
         out.append({
             'integration': integration['name'],
             'kind': integration.get('kind') or 'custom',
+            'gate_mode': (integration.get('gate_mode') or 'destructive').lower(),
             'tools': tools,
         })
     return {'integrations': out}
