@@ -123,22 +123,44 @@ def _decode_scalar(text):
     return text
 
 
-def _quote_opens(line, i):
-    """Whether a quote at `i` starts a scalar.
+def _quote_opens(line, i, flow_depth=0):
+    """Whether a quote at `i` starts a quoted scalar in YAML.
 
-    A plain scalar may contain an apostrophe (`it's`); YAML does not treat
-    that as an opening quote. Only a quote at a scalar boundary opens one.
+    A quote only opens where a value can start: the first non-space
+    character, after a `- ` / `? ` indicator, after a key colon, after a
+    flow separator (`[`, `{`, `,`) inside a flow collection, or after an
+    `&anchor` / `!tag` property. Anywhere else it is plain text, so two
+    apostrophes in separate plain flow items cannot pair up and hide a tag.
     """
-    if i == 0:
+    prefix = line[:i]
+    if not prefix.strip():
         return True
-    prev = line[i - 1]
-    return prev not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-'
+    # A block sequence/entry indicator at the start of the line.
+    if re.fullmatch(r'[ ]*[-?][ \t]+', prefix):
+        return True
+    if prefix[-1:] in ' \t':
+        before = prefix.rstrip()
+        # `key:` or `key: `, including a key whose value starts here.
+        if before.endswith(':'):
+            return True
+        # `key: &a 'value'` or `key: !tag 'value'`.
+        if re.search(r'(?:^|[ \t\[\{,])[&!][^\s]+$', before):
+            return True
+    # A flow collection separator, with optional spaces after it.
+    if flow_depth > 0:
+        before = prefix.rstrip()
+        if before and before[-1] in '[{,':
+            return True
+    # YAML allows no space after the key colon only in malformed text; do
+    # not open a quote there unless the colon ends the prefix.
+    return False
 
 
 def _strip_comment(line):
     """The line without its comment, and the quote state at end of line."""
     out = []
     quote = None
+    flow_depth = 0
     i = 0
     while i < len(line):
         ch = line[i]
@@ -152,13 +174,17 @@ def _strip_comment(line):
                 quote = None
             i += 1
             continue
-        if ch in '"\'' and _quote_opens(line, i):
+        if ch in '"\'' and _quote_opens(line, i, flow_depth):
             quote = ch
             out.append(ch)
         elif ch == '#' and (i == 0 or line[i - 1] in ' \t'):
             break
         else:
             out.append(ch)
+            if ch in '[{':
+                flow_depth += 1
+            elif ch in ']}':
+                flow_depth = max(0, flow_depth - 1)
         i += 1
     return ''.join(out), quote
 
@@ -166,6 +192,7 @@ def _strip_comment(line):
 def _first_colon(line):
     """The index of the first unquoted `:` or -1."""
     quote = None
+    flow_depth = 0
     i = 0
     while i < len(line):
         ch = line[i]
@@ -175,10 +202,14 @@ def _first_colon(line):
                 continue
             if ch == quote:
                 quote = None
-        elif ch in '"\'':
+        elif ch in '"\'' and _quote_opens(line, i, flow_depth):
             quote = ch
         elif ch == ':':
             return i
+        elif ch in '[{':
+            flow_depth += 1
+        elif ch in ']}':
+            flow_depth = max(0, flow_depth - 1)
         i += 1
     return -1
 
@@ -207,7 +238,14 @@ def _mapping_key_without_value(line):
     if _is_list_item(stripped) or stripped.startswith('?'):
         return False
     colon = _first_colon(line)
-    return colon >= 0 and not line[colon + 1:].strip()
+    if colon < 0:
+        return False
+    value = line[colon + 1:].strip()
+    if not value:
+        return True
+    # `key: &a` and `key: !tag` are properties with no value, so a list at
+    # the key's indentation still belongs to that key.
+    return all(part.startswith(('&', '!')) for part in value.split())
 
 
 def _block_scalar_opener(line):
@@ -311,6 +349,7 @@ def _tag_args(line):
     """
     found = []
     quote = None
+    flow_depth = 0
     i = 0
     while i < len(line):
         ch = line[i]
@@ -322,10 +361,14 @@ def _tag_args(line):
                 quote = None
             i += 1
             continue
-        if ch in '"\'':
+        if ch in '"\'' and _quote_opens(line, i, flow_depth):
             quote = ch
             i += 1
             continue
+        if ch in '[{':
+            flow_depth += 1
+        elif ch in ']}':
+            flow_depth = max(0, flow_depth - 1)
         match = _TAG_RE.match(line, i)
         if match:
             kind = match.group(1)
@@ -461,6 +504,7 @@ def _anchor_tokens_line(line):
     """The YAML anchor/alias/merge tokens on one uncommented line."""
     found = []
     quote = None
+    flow_depth = 0
     i = 0
     while i < len(line):
         ch = line[i]
@@ -472,10 +516,14 @@ def _anchor_tokens_line(line):
                 quote = None
             i += 1
             continue
-        if ch in '"\'':
+        if ch in '"\'' and _quote_opens(line, i, flow_depth):
             quote = ch
             i += 1
             continue
+        if ch in '[{':
+            flow_depth += 1
+        elif ch in ']}':
+            flow_depth = max(0, flow_depth - 1)
         if line.startswith('<<:', i):
             found.append(('merge', ''))
             i += 3

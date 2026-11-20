@@ -403,7 +403,41 @@ class TestSameIndentLists:
                      current) == 'config_include_refused'
 
 
+    def test_an_anchor_only_value_keeps_its_list(self):
+        current = ('first: &a\n'
+                   '- themes: !include_dir_merge_named themes\n')
+        out = validate_write('/config/configuration.yaml', current,
+                             current=current)
+        assert [item['parent'] for item in out['grandfathered']] == [
+            ('first: &a',)]
+
+    def test_a_tag_only_value_keeps_its_list(self):
+        current = ('first: !my_tag\n'
+                   '- themes: !include_dir_merge_named themes\n')
+        proposed = ('second: !my_tag\n'
+                    '- themes: !include_dir_merge_named themes\n')
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_include_refused'
+
+
 class TestMultilineQuotes:
+    def test_plain_flow_quotes_do_not_hide_an_include(self):
+        body = ('x: [a.\', !include "secrets.yaml", b.\']\n')
+        assert _code(validate_write, '/config/x.yaml', body) == \
+            'config_secret_include_refused'
+
+    def test_a_real_quoted_flow_item_keeps_its_hash_and_the_next_include(self):
+        body = ('x: ["safe # !include secrets.yaml", '
+                '!include "secrets.yaml"]\n')
+        assert _code(validate_write, '/config/x.yaml', body) == \
+            'config_secret_include_refused'
+
+    def test_a_real_quoted_scalar_can_contain_include_looking_text(self):
+        out = validate_write('/config/x.yaml',
+                             'x: "safe # !include secrets.yaml"\n')
+        assert out['includes'] == []
+
+
     def test_a_quoted_value_across_lines_is_refused(self):
         assert _code(validate_write, '/config/x.yaml',
                      'a: "one\n  two"\n') == 'config_yaml_multiline_quote'
