@@ -23151,3 +23151,15 @@ that ever existed.
 Nit: an agent created before this change can already carry a reserved
 name. List any such agent once at startup in an audit row, so the
 operator can replace it with a new agent.
+
+### Security: CB14 confirmed (e4c2165)
+
+Read as code text only; nothing was run. **Approved to merge.**
+
+* The rename endpoint, its payload model and `rename_agent_token` are
+  gone; a test checks that `PATCH` returns 405.
+* At startup, `list_reserved_agent_names` matches names case-insensitively
+  with bound parameters. One `agent_reserved_name_present` audit row
+  names any match; nothing is renamed.
+* The reserved-name check at creation and the quiet refresh from 548fb9d
+  are unchanged.
