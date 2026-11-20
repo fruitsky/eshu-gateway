@@ -116,3 +116,10 @@ def test_helper_domain_is_hidden_even_though_it_maps_to_switch():
                           _attrs(), 'demo')
     assert row['category'] == 'switch'
     assert row['useful'] is False
+
+
+def test_a_lock_is_risky_without_a_device_class():
+    row = classify_entity('lock.front_door', _reg(name='Front door'),
+                          _attrs(), 'demo')
+    assert row['risky'] is True
+    assert row['useful'] is True

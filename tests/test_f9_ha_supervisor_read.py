@@ -102,7 +102,7 @@ class TestFreezeCoversIntegrations:
         assert 'frozen' not in out
 
     @pytest.mark.parametrize('case', ['always', 'agent_gated', 'gate_all'])
-    def test_f9_frozen_dry_run_keeps_the_same_gate(self, ha, monkeypatch, case):
+    def test_f9_the_freeze_does_not_change_the_gate_decision(self, ha, monkeypatch, case):
         from core.agent_context import reset_current_agent, set_current_agent
         from core.agent_policy import static_tool_decision
         from db.agent_policies import get_agent_policy, set_agent_policy
@@ -126,6 +126,9 @@ class TestFreezeCoversIntegrations:
         assert frozen['should_gate'] == unfrozen['should_gate']
         assert frozen['outcome'] == unfrozen['outcome']
         assert frozen['frozen'] is True
+        # This is the gate decision before the handler dry-run exemption.
+        # At run time the exemption clears it, frozen or not; a dry-run writes
+        # nothing. The point here is that the freeze does not change it.
         assert frozen['should_gate'] is True
 
         _patch_ws(monkeypatch, result={'title': 'Home', 'views': []})

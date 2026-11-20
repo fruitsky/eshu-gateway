@@ -1498,6 +1498,20 @@ def test_bj3_the_window_token_is_not_logged_in_full(gw):
     assert "token_fp=${ESHU_WINDOW_TOKEN_FP}" in src
 
 
+def test_bj3_missing_sha256sum_logs_unknown_not_a_raw_prefix(gw):
+    stub = gw.bin / "sha256sum"
+    stub.write_text("#!/bin/sh\nexit 127\n")
+    stub.chmod(0o755)
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "window-ok" in proc.stdout
+    assert proc.returncode == 0
+    lines = [line for line in gw.logger_text().splitlines() if "WINDOW" in line]
+    assert lines and "token_fp=unknown" in lines[-1]
+    assert "wintok" not in gw.logger_text()
+    assert "token=wintok" not in lines[-1]
+
+
 def test_bj3_gateway_logs_the_dashboard_token_fp_not_the_token(gw):
     token = "WINDOWSECRET" + "A" * 20
     gw.approved_windows("%s|echo window-ok|0|0|0|0|0|exact" % token)

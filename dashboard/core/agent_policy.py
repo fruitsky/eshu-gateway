@@ -285,13 +285,13 @@ def static_tool_decision(agent, integration, tool_name, tool, frozen=False):
                 'reason': 'tool is not available to this principal',
                 'frozen': False, 'gate_mode': '', 'approval': 'inherit',
                 'always': bool(tool.get('always_gate')),
-                'should_gate': False}
+                'should_gate': True}
     allowed, reason = tool_allowed(agent, integration.get('name') or '', name)
     if not allowed:
         return {'outcome': 'none', 'allowed': False, 'reason': reason,
                 'frozen': False, 'gate_mode': '', 'approval': 'inherit',
                 'always': bool(tool.get('always_gate')),
-                'should_gate': False}
+                'should_gate': True}
     gate_mode = (integration.get('gate_mode') or 'destructive').lower()
     approval = approval_mode(agent, integration.get('name') or '', name)
     always = bool(tool.get('always_gate'))

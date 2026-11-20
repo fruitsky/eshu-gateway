@@ -141,8 +141,9 @@ def classify_entity(entity_id, reg=None, attrs=None, platform=''):
     category = CATEGORY_BY_DOMAIN.get(domain, '')
     sensor_kind = _sensor_kind(reg, attrs) if category == 'sensor' else ''
     reason = _hidden_reason(entity_id, reg, platform)
-    risky = str(reg.get('device_class') or
-                attrs.get('device_class') or '').lower() in _RISKY_CLASSES
+    risky = domain == 'lock' or str(
+        reg.get('device_class') or attrs.get('device_class') or ''
+    ).lower() in _RISKY_CLASSES
     # A risky device is always visible: a lock or garage door is exactly what
     # the operator must see, even if a registry marks it as a setting.
     useful = bool(category) and (not reason or risky)
@@ -214,7 +215,7 @@ def _build(integration):
                 label_ids.append(lid)
         platform = str(reg.get('platform') or '')
         classified = classify_entity(ent, reg, attrs, platform)
-        risky = str(attrs.get('device_class') or '').lower() in _RISKY_CLASSES
+        risky = bool(classified['risky'])
         out.append({
             'id': ent,
             'name': _entity_name(reg, state),

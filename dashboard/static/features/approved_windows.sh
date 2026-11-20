@@ -32,7 +32,8 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
   # The dashboard's token_fp is the first eight hex of SHA-256. The raw token
   # must never appear in a syslog line; the hash is enough to correlate with
   # the dashboard's audit row and useless for claiming a window.
-  ESHU_WINDOW_TOKEN_FP=$(printf '%s' "$ESHU_WINDOW_TOKEN" | sha256sum | cut -c1-8)
+  ESHU_WINDOW_TOKEN_FP=$(printf '%s' "$ESHU_WINDOW_TOKEN" | sha256sum 2>/dev/null | cut -c1-8) || ESHU_WINDOW_TOKEN_FP=""
+  [ -n "$ESHU_WINDOW_TOKEN_FP" ] || ESHU_WINDOW_TOKEN_FP=unknown
   now_ts=$(date +%s)
   # Get UTC day-of-week: 1=Mon..7=Sun, as bitmask 1=Mon..64=Sun
   dow_num=$(date -u +%u)  # 1=Mon..7=Sun

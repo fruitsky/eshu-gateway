@@ -378,3 +378,15 @@ def test_tiles_carry_curated_display_names(monkeypatch):
     assert rows['tfl']['display'] == 'TfL'
     assert rows['webfetch']['display'] == 'Web fetch'
     assert rows['lower case']['display'] == 'Lower case'
+
+
+def test_a_not_allowed_decision_still_fails_closed():
+    from core.agent_policy import static_tool_decision
+    agent = {'name': 'test-agent', 'policy': {
+        'tools_mode': 'allowlist', 'tools': ['other_*']}}
+    tool = {'name': 'change', 'read_only': False}
+    decision = static_tool_decision(
+        agent, {'name': 'Custom', 'gate_mode': 'none'}, 'change', tool)
+    assert decision['outcome'] == 'none'
+    assert decision['allowed'] is False
+    assert decision['should_gate'] is True
