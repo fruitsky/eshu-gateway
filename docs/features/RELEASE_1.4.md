@@ -152,10 +152,11 @@ the upgrade shows its last known hash until the next heartbeat.
   a path token from an older gateway until that gateway is upgraded. The
   dashboard's own access log masks it, but the proxy's log is outside its
   control. Retire the path claim at the X9 cut-over.
-* **Gateway logs.** An older gateway still prints the first 8 characters of
-  the token in its own log lines. The next gateway release moves those lines
-  to the same fingerprint the dashboard uses; this release does not change
-  gateway code.
+* **Gateway logs.** A gateway keeps printing the first 8 characters of the
+  token in its own log lines until its installer is re-run. The fleet
+  rollout re-runs the installer, which fetches the fixed feature file and
+  switches those lines to `token_fp`, the same fingerprint the dashboard
+  uses. Prefixes already in old syslog stay there.
 * **Screenshots and docs.** The Stage 3 screenshots in
   `docs/screenshots/x11/` are synthetic (`192.0.2.x`, `*.example.test`) and
   contain no live data.
