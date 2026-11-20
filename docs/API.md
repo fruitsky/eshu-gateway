@@ -26,7 +26,8 @@ only the dashboard UI after login.
 | `GET` | `/api/request_status/{id}` | Check JIT request status | Gateway |
 | `GET` | `/api/gateway-script` | Raw golden installer (UTF-8) | Public |
 | `GET` | `/api/gateway-script-rollback` | Previous golden installer (for rollback) | Public |
-| `POST` | `/api/approved-windows/execute/{token}` | Increment usage on a valid window token (called by gateway) | Gateway |
+| `POST` | `/api/approved-windows/execute` | Increment usage on a valid window token in the JSON body (`{"window_token": "..."}`; called by gateway) | Gateway |
+| `POST` | `/api/window-by-token` | Full window parameters for an existing token in the JSON body (`{"token": "..."}`); the token is not echoed | Public |
 | `POST` | `/api/uninstall-started/{ip}` | Poller confirmation that the transient uninstall service launched (clears the re-spawn trigger) | Gateway |
 | `POST` | `/api/uninstall-progress` | Progress updates from the uninstall service | Gateway |
 | `GET` | `/api/docs/agent-windows` | Alias for the AI agent manual | Public |
@@ -42,14 +43,15 @@ only the dashboard UI after login.
 | `POST` | `/api/window-requests/{id}/approve` | Approve a request and reveal its token | Session |
 | `POST` | `/api/window-requests/{id}/deny` | Deny a request | Session |
 | `GET` | `/api/approved-windows` | List windows (`?ip=` filter) — `token` + `retrieval_key` omitted for unauthenticated callers | Public (read) |
-| `GET` | `/api/approved-windows/{retrieval_key}` | Single window (incl. token) by opaque key; numeric `id` only for session-authed callers | Public (read) |
-| `GET` | `/api/approved-windows/{retrieval_key}/executions` | Usage history for a window (opaque key; numeric `id` session-only) | Public (read) |
+| `GET` | `/api/approved-windows/{retrieval_key}` | Single window (no raw token; `token_fp` only) by opaque key; numeric `id` only for session-authed callers | Public (read) |
+| `GET` | `/api/approved-windows/{retrieval_key}/executions` | Usage history for a window (token_fp only; opaque key, numeric `id` session-only) | Public (read) |
 | `GET` | `/api/approved-windows/recent-jit` | Recent JIT approvals for the window-creation wizard | Session |
 | `POST` | `/api/approved-windows` | Create a window | Session |
 | `PUT` | `/api/approved-windows/{id}` | Update a window | Session |
 | `DELETE` | `/api/approved-windows/{id}` | Delete a window | Session |
 | `POST` | `/api/approved-windows/{id}/toggle` | Enable/disable a window | Session |
-| `GET` | `/api/window-by-token/{token}` | Full window parameters for an existing token (for scheduling) | Token-in-path |
+| `GET` | `/api/window-by-token/{token}` | **Retired** — 410 Gone; use `POST /api/window-by-token` | — |
+| `POST` | `/api/approved-windows/execute/{token}` | Legacy path claim for pre-BJ2 gateways; accepted until the X9 cut-over and audited with token_fp only. Prefer the body form. | Gateway |
 
 ## Dashboard Endpoints (authentication required)
 

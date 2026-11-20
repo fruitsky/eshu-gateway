@@ -22646,6 +22646,17 @@ sections above absorb those answers.
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
+
+**X9 legacy cut-over — retire the window path claim.** The pre-BJ2
+`POST /api/approved-windows/execute/{token}` route stays accepted in 1.4
+and writes a `window_legacy_path_claim_used` audit row (token_fp and
+gateway only). Retire it at the X9 legacy cut-over. Check first: no
+`legacy path claim used` row for 7 days.
+
+**Gateway follow-up.** `approved_windows.sh` logs
+`${ESHU_WINDOW_TOKEN:0:8}` in its own lines. Move those to the same
+SHA-256 fingerprint the dashboard uses in the next gateway release; do
+not change the gateway in 1.4.
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
 | 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Operator polish in review** 2026-11-19: one-section editor with `#agent/<id>/<section>` deep links, danger zone, collapsible tools, grouped two-row device grid and phone cards, the two risky groups, Check-gated JSON. Stage 2 merged (`24a043a`); Stage 3 Part 1 approved (`2879f80`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | operator reviews Part A/C; not deployed |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
@@ -23302,3 +23313,101 @@ starting.
 * Catch the exception, log it, and continue. The flag is not set on
   failure, so the next start retries.
 * The masking matters, but it is not worth an outage.
+
+### Security review of the window-token routes (`fix/window-token-routes` @ 1a6d28f)
+
+**Approved once W1 is in; W2 should go in with it.** Code text read only;
+nothing was run.
+
+**What holds:**
+* The lookup moves to `POST /api/window-by-token` with the token in the
+  body. It is still rate-limited, and the token is no longer echoed back.
+* The old GET returns 410, and its body and audit row carry only
+  `token_fp`.
+* The body claim no longer returns the token.
+* Window execution history, including the public retrieval-key read, now
+  returns `token_fp` in place of the stored token.
+* The uvicorn access-log filter masks the token segment of both retired
+  path forms, plus a `token=`/`window_token=` query value.
+* E2E-1's C11 uses the body lookup now, which settles my earlier nit.
+
+**W1 (must, as you already asked): keep the path claim working until the
+fleet runs BJ2.**
+* At this commit, `POST /api/approved-windows/execute/{token}` returns
+  410. A pre-BJ2 gateway treats any non-200 answer as a refusal (see
+  `approved_windows.sh`), so every window on an old gateway stops working
+  the moment this deploys.
+* That fails closed, but it is an outage.
+* Route it through `_window_execute` again. That keeps the gateway-token
+  and target-IP checks, which run before anything else.
+* Add one audit row per use, with `token_fp` and the gateway IP, so the
+  BJ2 retirement can count the remaining users.
+* Retire it with the X9 legacy cut-over, not before.
+
+**W2 (should): don't let the public retired GET write an unlimited stream
+of audit rows.**
+* `GET /api/window-by-token/{token}` is unauthenticated, and it writes an
+  audit row on every request, before any rate limit.
+* Call `_check_rate_limit` first, then write at most one
+  `window_lookup_route_retired` row per client IP per minute, the BZ2
+  pattern.
+* The kept path claim is gateway-authenticated, so its per-use row is
+  bounded. Audit after `_resolve_gateway_token` passes, so an
+  unauthenticated caller writes nothing.
+
+**Nits:**
+* **Proxy logs.** The access-log filter covers uvicorn only. If a reverse
+  proxy fronts the dashboard, its log still records the path token from
+  pre-BJ2 gateways until W1's route is retired. Say so in the release
+  note.
+* **Gateway logs.** The gateway's own log lines keep
+  `${ESHU_WINDOW_TOKEN:0:8}`, the first 8 characters of the token itself.
+  Moving them to the same SHA-256 fingerprint the dashboard uses would
+  let an operator correlate the two logs. That can wait for the next
+  `approved_windows.sh` touch.
+* **Out of scope, agreed.** The stored token in `window_executions` and
+  the retrieval key in the path of `GET /api/approved-windows/{key}` can
+  wait for the proposal. For the first, store only the fingerprint: the
+  claim already looks windows up through `approved_windows`.
+
+### Security re-read of the window-token routes (security reviewer, 2026-11-19, at `e3ea1ec`)
+
+**Approved to merge.** Code text read only; nothing was run.
+* **W1 is confirmed.**
+  * The path claim goes through `_window_execute` again, with
+    `legacy_path=True`.
+  * `window_legacy_path_claim_used` is written only after both the
+    gateway token and the target IP check pass. It carries `token_fp` and
+    the gateway IP, so an unauthenticated or mismatched caller writes
+    nothing.
+  * The X9 retirement rule and its 7-day check are recorded.
+* **W2 is confirmed.** The retired GET calls `_check_rate_limit` first,
+  then writes at most one row per client IP per minute, and still never
+  echoes the token.
+* **The stored token is gone.**
+  * New `window_executions` rows store only `token_fp`.
+  * The start-up migration fingerprints and blanks every non-empty token.
+    It skips rows that are already blank, so it is idempotent.
+  * The execution read selects named columns.
+  * The single-window read, by retrieval key or by the operator's numeric
+    id, returns `token_fp` in place of the token.
+  * Agents still get their token where the manual says they get it: in
+    the approval response and in the `window-requests/{retrieval_key}`
+    poll.
+* **What remains documented.** Proxy logs during the 1.4 overlap, and the
+  gateway's own 8-character log lines, are recorded as follow-ups.
+
+**Nits:**
+* **A stale manual line.** `docs/AGENT_MANUAL.md` (around line 708) still
+  says `GET /api/approved-windows/$RETRIEVAL_KEY` returns
+  "full record + token by opaque key". The `get_single_window` docstring
+  says "includes the token" too. Fix both, so no agent is told to read a
+  token there.
+* **A split table.** The new "X9 legacy cut-over" and "Gateway
+  follow-up" paragraphs landed between rows 28 and 29 of the status
+  table, which breaks it into two. Move them below the table.
+* **Old copies.** Backups taken before the migration still hold raw
+  tokens in `window_executions`. Add one CHANGELOG line, as for the audit
+  migration.
+* **Pruning.** `_retired_lookup_audit` is never pruned. Drop entries
+  older than the window when an entry is written, as for BZ2's dictionary.

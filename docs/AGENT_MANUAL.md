@@ -707,7 +707,11 @@ The token is returned only at approval: `{"status": "approved", "token": "..."}`
 ```bash
 curl -s -H "Authorization: Bearer $ESHU_AGENT_TOKEN" "$DASHBOARD_URL/api/approved-windows" | python3 -m json.tool  # all windows (token omitted in the list)
 curl -s "$DASHBOARD_URL/api/approved-windows/$RETRIEVAL_KEY" | python3 -m json.tool  # full record + token by opaque key
-curl -s "$DASHBOARD_URL/api/window-by-token/<TOKEN>" | python3 -m json.tool    # parameters for an existing token
+curl -s -X POST "$DASHBOARD_URL/api/window-by-token" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<'JSON' | python3 -m json.tool
+{"token": "<TOKEN>"}
+JSON
 ```
 
 Creating/editing/toggling windows and approving/denying requests remain **operator-only**.
@@ -715,7 +719,8 @@ Creating/editing/toggling windows and approving/denying requests remain **operat
 ### Operator-created windows
 
 If the operator pre-configures a window and hands you the token, use
-`/api/window-by-token/<TOKEN>` to read its command/schedule/remaining executions, then run
+`POST /api/window-by-token` with `{"token": "<TOKEN>"}` to read its
+command/schedule/remaining executions, then run
 it on schedule:
 
 ```bash
@@ -737,7 +742,7 @@ Window tokens are 24 letters/digits (older 10-character tokens keep working).
 
 The gateway validates the token, checks expiry + schedule + command match, notifies the
 dashboard to increment the execution counter, and auto-disables the window once
-`execution_count >= max_executions`. **Do not call `/api/approved-windows/execute/{token}`
+`execution_count >= max_executions`. **Do not call `/api/approved-windows/execute`
 yourself** — the gateway does it. If the dashboard answers that claim with anything
 other than success, the window is rejected; only when the dashboard cannot be reached
 at all does the gateway fall back to its local window cache.
@@ -836,8 +841,8 @@ Wait a few seconds and retry with exponential backoff.
 | `/api/window-requests` | POST | Submit window request | Agent or gateway token |
 | `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
 | `/api/approved-windows` | GET | List windows (full status; token omitted for non-session callers; a gateway token sees only its own) | Agent/gateway token or session |
-| `/api/approved-windows/{retrieval_key}` | GET | Single window details + token (read-only) | Public (read) |
-| `/api/window-by-token/{token}` | GET | Parameters for an existing token (token is the auth) | Public |
+| `/api/approved-windows/{retrieval_key}` | GET | Single window details, `token_fp` only (read-only) | Public (read) |
+| `/api/window-by-token` | POST | Parameters for an existing token in the JSON body (token is the auth; not echoed) | Public |
 | `/api/docs/agent-windows` | GET | Alias for this manual (full guide incl. Approved Windows) | Public |
 | `/api/docs/agent-manual` | GET | This manual | Public |
 

@@ -317,19 +317,23 @@ class TestAuth:
 
 class TestWindows:
 
-    def test_window_by_token_lookup(self, auth_client, gateway_headers):
+    def test_window_by_token_lookup(self, client, auth_client, gateway_headers):
         from db.windows import create_approved_window
         result = create_approved_window("10.0.0.1", "docker ps", 0, 0, 1, "test-win", 0, 0)
         token = result["token"]
-        r = auth_client.get(f"/api/window-by-token/{token}")
+        r = auth_client.post("/api/window-by-token", json={"token": token})
         assert r.status_code == 200
         data = r.json()
         assert data["command"] == "docker ps"
-        assert data["token"] == token
+        assert "token" not in data
         assert data["target_ip"] == "10.0.0.1"
+        # The old path is retired, not a silent alias.
+        old = client.get(f"/api/window-by-token/{token}")
+        assert old.status_code == 410
+        assert token not in old.text
 
     def test_window_by_token_404(self, client):
-        r = client.get("/api/window-by-token/nonexistent")
+        r = client.post("/api/window-by-token", json={"token": "nonexistent"})
         assert r.status_code == 404
 
 

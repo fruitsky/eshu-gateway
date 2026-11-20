@@ -136,7 +136,8 @@ def init_windows_tables(cursor):
             token TEXT NOT NULL,
             target_ip TEXT NOT NULL,
             command TEXT NOT NULL,
-            executed_at INTEGER NOT NULL
+            executed_at INTEGER NOT NULL,
+            token_fp TEXT NOT NULL DEFAULT ''
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_win_exec_window ON window_executions(window_id)')
@@ -146,6 +147,17 @@ def init_windows_tables(cursor):
             cursor.execute(f"ALTER TABLE window_executions ADD COLUMN {col} INTEGER DEFAULT {defval}")
         except sqlite3.OperationalError:
             pass
+    try:
+        cursor.execute("ALTER TABLE window_executions ADD COLUMN token_fp TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    # Existing rows keep only the fingerprint. Run once per start; rows already
+    # blanked are skipped, so the migration is idempotent.
+    for rid, raw in cursor.execute(
+            "SELECT id, token FROM window_executions WHERE token != ''").fetchall():
+        cursor.execute(
+            "UPDATE window_executions SET token_fp = ?, token = '' WHERE id = ?",
+            (token_fingerprint(raw), rid))
 
 def create_approved_window(target_ip: str, command: str, window_start: int = 0, window_end: int = 0,
                            max_executions: int = 1, label: str = '', days_of_week: int = 0,
@@ -394,9 +406,11 @@ def record_window_execution(window_id: int, token: str, target_ip: str, command:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO window_executions (window_id, token, target_ip, command, executed_at, success, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (window_id, token, target_ip, command, now, success, reason))
+            INSERT INTO window_executions
+                (window_id, token, target_ip, command, executed_at, success, reason, token_fp)
+            VALUES (?, '', ?, ?, ?, ?, ?, ?)
+        ''', (window_id, target_ip, command, now, success, reason,
+              token_fingerprint(token)))
         cursor.execute('''
             DELETE FROM window_executions
             WHERE window_id = ? AND id NOT IN (
@@ -410,7 +424,9 @@ def get_window_executions(window_id: int, limit: int = 50) -> list:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT * FROM window_executions WHERE window_id = ?
+            SELECT id, window_id, target_ip, command, executed_at, success,
+                   reason, token_fp
+            FROM window_executions WHERE window_id = ?
             ORDER BY executed_at DESC, id DESC LIMIT ?
         ''', (window_id, limit))
         rows = cursor.fetchall()
