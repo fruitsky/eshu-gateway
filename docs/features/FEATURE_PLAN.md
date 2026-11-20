@@ -23102,3 +23102,45 @@ part.
 * **Reserved agent names.** `operator-test`, `operator` and `mcp` are refused
   case-insensitively when an agent is created or renamed. `PATCH
   /api/agents/{id}` renames one token and audits `agent_token_renamed`.
+
+### Security: `fix/ha-files-nits` review (548fb9d)
+
+Read as code text only; nothing was run.
+
+**Approved once CB14 is fixed.**
+
+**What holds.**
+
+* **Refresh.** The refresh now writes, bumps the version and audits only
+  when the pins, `pending`, the dismissals or the HA pin changed. A
+  waiting joiner that leaves the label, or becomes protected, is dropped
+  from `pending`.
+* **Dismissal expiry.** A dismissal with an empty registry id expires
+  when the entity leaves the label or the registry supplies an id. A
+  known id expires when it differs.
+* **Reserved names.** `validate_agent_name` refuses `operator-test`,
+  `operator` and `mcp`, in any case, at creation.
+
+**CB14 (must). The new rename endpoint changes what an agent name points
+to.** `PATCH /api/agents/{id}` is new; the nit asked only for a check at
+creation. Agent names are still a live lookup key in several places:
+
+* sessions and `_agent_standing` in `core/checks.py`;
+* pending calls, through `_caller_agent`;
+* the gateway SSH request's `agent` field, which sets `force_jit`;
+* web_fetch principals and each tool's `principal_allow`;
+* every audit and call row.
+
+Renaming breaks those links in both directions:
+
+* An agent renamed to a deleted agent's old name inherits that agent's
+  open sessions, pending calls and principal allowlist entries.
+* The renamed agent's own existing references become "unknown".
+
+Fix: drop rename from this branch. If rename is wanted, give it its own
+chunk, and first move those lookups from name to id, or refuse any name
+that ever existed.
+
+Nit: an agent created before this change can already carry a reserved
+name. List any such agent once at startup in an audit row, so the
+operator can rename it by hand.
