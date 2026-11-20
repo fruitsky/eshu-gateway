@@ -18309,10 +18309,90 @@ work for config entries:
   * Add the WS prefix to the matcher.
 * An entity-registry rename, the reuse case, is covered now.
 
+**BZ3 implementation (2026-11-17).** `config_entries/*` (WS) is now a
+registry-write path as well as `config/config_entries/*` (REST). An approved
+config-entry write calls `allowances.on_config_entry_write` instead of a pin
+refresh: it reads `entry_id`/`config_entry_id` from the path, query or
+body, then suspends every live allowance whose stored entities belong to that
+entry in the current registry, with reason `config_entry_changed`. If no
+single entry id can be read, or the registry cannot be read, every HA
+allowance is suspended with the same reason. The entity-registry path still
+does `refresh_pins`. Tests in `tests/test_f27_config_entry.py` cover the WS
+matcher, the template-helper options edit, an unidentifiable write (suspend
+all), an unrelated entry (leave live) and the real
+`note_ha_registry_write` hook.
+
+**CB3/CB4 implementation (2026-11-17).** The WS branch now calls
+`note_ha_registry_write` only when the call is mutating, and
+`is_config_entry_write_path` excludes the read forms `get`, `get_single`,
+`subscribe`, `flow/progress`, `flow_handlers` and `subentries/list`, so a
+read cannot suspend allowances. If the hook itself raises, it calls
+`on_config_write_failed`, which suspends every HA allowance and writes the
+failure row. The generic and approved-execution paths pass both `data` and
+`params`; two different entry ids are therefore ambiguous and fail closed.
+Tests cover the read commands, a read leaving both allowances live, both
+payload keys, and a raising hook suspending everything.
+
 **Merge note.** E2E-1's CA5 adds `integration_calls.excluded`. Whichever
 branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
 `allowance:%` queries (the statistics series and the session card).
 Otherwise excluded test calls still count in the allowance bucket.
+
+### Security review of the BZ3 fix (`fix/f27-config-entry-suspend` @ d7d82e7)
+
+**Approved to merge once CB3 is in.** Code text read only; nothing was run.
+
+**What holds:**
+* The matcher now takes the WebSocket form `config_entries/*` as well as
+  REST `config/config_entries/*`.
+* An approved config-entry write calls `on_config_entry_write`:
+  * The entry id is read only from the path's `entry/<id>`, the query and
+    the `entry_id`/`config_entry_id` keys, and reserved words are
+    rejected.
+  * The write then suspends every live allowance that holds an entity of
+    that entry.
+  * When there is no single id, or the registry cannot be read, every HA
+    allowance is suspended. That is AZ2's conservative branch.
+* An options flow's later steps carry only a flow id, so they fall into
+  "not identifiable" and suspend everything. That is the safe direction.
+* Entity-registry writes still re-check the pins.
+
+**CB3 (should, before merge): a read must not suspend everything.**
+* In `_run_tool`, the WS branch calls `note_ha_registry_write` for every
+  WS call, reads included. The generic branch checks `mutating`; the WS
+  branch does not.
+* The WS reads `config_entries/get`, `config_entries/subscribe` and
+  `config_entries/flow/progress` match the new prefix and name no entry.
+  Any agent read of the config entries, including an inventory pass
+  through a WS read tool, therefore suspends every HA allowance with
+  `config_entry_changed`.
+* That fails closed, but any read-only agent can then turn allowances off
+  at will, and the audit log fills with suspensions.
+* **Fix:**
+  * Call the hook in the WS branch only when the call is `mutating`.
+  * In `is_config_entry_write_path`, also exclude the read commands
+    `get`, `get_single`, `subscribe`, `flow/progress`,
+    `flow_handlers` and `subentries/list`.
+  * Add a test: a read-only `config_entries/get` leaves a live allowance
+    live.
+
+**CB4 (should): an error in the hook must fail closed.**
+* `note_ha_registry_write` wraps the work in `except Exception: pass`. If
+  `on_config_entry_write` or `_suspend_all` raises, for example on a
+  locked database or a registry row of an unexpected shape, the allowances
+  stay live after a config-entry write.
+* **Fix:** in the `except`, call `allowances.on_config_write_failed(actor,
+  value, exc)`, the AZ2 fail-closed path. If that raises as well, log it.
+
+**Nits:**
+* **The generic branch's payload.** It passes `data or params`, so an
+  entry id in `params` is ignored whenever `data` is present. Pass both,
+  for example `{'data': ..., 'params': ...}`. A write naming two different
+  ids then becomes "ambiguous", which suspends everything.
+* **Timing.** Suspension runs after the write returns, so a claim already
+  in flight can run on the redefined entity in that gap of milliseconds.
+  That is acceptable for an operator-approved write. If it is ever cheap,
+  suspend before the write; a failed write then costs only a resume.
 
 ### Security review — HA-by-kind fix (`fix/f27-ha-by-kind` @ c38d5ed)
 
@@ -18361,6 +18441,38 @@ made on.**
 **Nit.** `_ha_integration()` lists every integration on each
 `call_service` call. That is fine at this scale. If it shows up in a
 profile, cache the result per request.
+
+### Security re-read of CB3/CB4 (security reviewer, 2026-11-19, at `db96597`)
+
+**CB3 and CB4 hold. BZ3 is approved to merge.** Code text read only;
+nothing was run.
+
+**CB3 is confirmed, on two layers.**
+* `_run_tool`'s WS branch calls the hook only when the tool is
+  `mutating`.
+* `is_config_entry_write_path` also rejects the read commands `get`,
+  `get_single`, `list`, `subscribe`, `flow/progress`, `flow_handlers` and
+  `subentries/list`, and any path below them. It drops a query string
+  first.
+* So a write-capable generic WS tool that sends `config_entries/get` does
+  not suspend anything either.
+* REST writes (`entry/<id>`, `flow`, `options/flow/...`) still match.
+  `test_a_config_entry_read_is_not_a_write` covers both sides.
+
+**CB4 is confirmed.**
+* An exception in the hook now calls `on_config_write_failed`, which
+  suspends every HA allowance with one audit row.
+* Only a second failure falls back to a `allowance_config_entry_hook_failed`
+  row. Tested.
+
+**The nit is done.** Both the runner and the approval path pass
+`{'data': ..., 'params': ...}`, so an entry id in `params` is no longer
+lost. Two different ids read as ambiguous and suspend everything. Tested.
+
+**On "fail closed when the outcome is unknown".** The hook runs after
+the call whether it succeeded or not, so a failed write still suspends.
+That is the conservative choice, and it is right; the cost is one
+Resume.
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 

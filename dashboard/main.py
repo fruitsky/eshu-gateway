@@ -5688,7 +5688,8 @@ def approve_integration_call(call_id: int, request: Request):
             # an entity; re-read the pins before this approval returns.
             from core.tool_runner import note_ha_registry_write
             note_ha_registry_write(
-                integration, payload.get('command') or tool.get('path_template'))
+                integration, payload.get('command') or tool.get('path_template'),
+                payload.get('payload'))
         elif tool.get('generic'):
             method = payload.get('method') or 'POST'
             path = payload.get('path') or ''
@@ -5701,7 +5702,9 @@ def approve_integration_call(call_id: int, request: Request):
                                           approval='approved', decided_at=decided_at,
                                           decided_by='operator')
             from core.tool_runner import note_ha_registry_write
-            note_ha_registry_write(integration, path)
+            note_ha_registry_write(
+                integration, path,
+                {'data': payload.get('data'), 'params': payload.get('params')})
             if not result.get('error'):
                 verified = None
                 vpath = payload.get('verify_path')

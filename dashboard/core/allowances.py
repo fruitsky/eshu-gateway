@@ -490,19 +490,116 @@ _ENTITY_RE = re.compile(r'^[a-z0-9_]+\.[a-z0-9_]+$')
 _SERVICE_RE = re.compile(r'^[a-z0-9_]+$')
 
 
-def is_registry_write_path(value):
-    """True for an HA entity-registry or config-entry write (BD5/BX2).
-
-    Accepts a WS command (`config/entity_registry/update`), a REST path
-    (`/api/config/entity_registry/...`), or a `/config/...` path.
-    """
+def _normalise_registry_path(value):
     text = str(value or '').strip().lower().replace('\\', '/').lstrip('/')
     if text.startswith('api/'):
         text = text[4:]
     if text.startswith('homeassistant/'):
         text = text[len('homeassistant/'):]
+    return text
+
+
+_CONFIG_ENTRY_READS = {
+    'get', 'get_single', 'list', 'subscribe', 'flow/progress',
+    'flow_handlers', 'subentries/list',
+}
+
+
+def is_config_entry_write_path(value):
+    """True for a config-entry write, REST or WebSocket.
+
+    HA's websocket command is `config_entries/...` with no `config/` prefix;
+    REST is `config/config_entries/...` (optionally under `/api/`). BZ3: the
+    WS form must match too, or an options-flow edit never suspends anything.
+    CB3: reads (`get`, `get_single`, `subscribe`, `flow/progress`,
+    `flow_handlers`, `subentries/list`) are not writes and must not suspend.
+    """
+    text = _normalise_registry_path(value).split('?', 1)[0]
+    if text.startswith('config/config_entries/'):
+        rest = text[len('config/config_entries/'):]
+    elif text.startswith('config_entries/'):
+        rest = text[len('config_entries/'):]
+    else:
+        return False
+    rest = rest.strip('/')
+    if not rest or rest in _CONFIG_ENTRY_READS:
+        return False
+    return not any(rest == read or rest.startswith(read + '/')
+                   for read in _CONFIG_ENTRY_READS)
+
+
+def is_registry_write_path(value):
+    """True for an HA entity-registry or config-entry write (BD5/BX2/BZ3).
+
+    Accepts a WS command (`config/entity_registry/update`,
+    `config_entries/options/flow`), a REST path
+    (`/api/config/entity_registry/...`), or a `/config/...` path.
+    """
+    text = _normalise_registry_path(value)
     return (text.startswith('config/entity_registry/')
-            or text.startswith('config/config_entries/'))
+            or is_config_entry_write_path(text))
+
+
+_CONFIG_ENTRY_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+_CONFIG_ENTRY_RESERVED = {
+    'entry', 'entries', 'get', 'list', 'flow', 'options', 'subscribe',
+    'unsubscribe', 'progress', 'start', 'finish', 'abort', 'create',
+    'delete', 'update', 'reload', 'config', 'config_entries',
+}
+
+
+def _valid_entry_id(value):
+    text = str(value or '').strip()
+    if not text or text.lower() in _CONFIG_ENTRY_RESERVED:
+        return ''
+    return text if _CONFIG_ENTRY_ID_RE.fullmatch(text) else ''
+
+
+def _entry_ids_in(value, found):
+    """Collect entry ids only from the keys HA actually uses."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in ('entry_id', 'config_entry_id'):
+                entry = _valid_entry_id(item)
+                if entry:
+                    found.add(entry)
+            elif isinstance(item, (dict, list, tuple)):
+                _entry_ids_in(item, found)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _entry_ids_in(item, found)
+    elif isinstance(value, str) and value[:1] in ('{', '['):
+        import json
+        try:
+            _entry_ids_in(json.loads(value), found)
+        except (TypeError, ValueError):
+            return
+
+
+def config_entry_id_from_write(value, payload=None):
+    """The one config_entry_id a write names, or '' when it is ambiguous.
+
+    The id can be in the path (`.../entry/<id>/options`), in a query string,
+    or in the WS/REST body (`entry_id` / `config_entry_id`). Two different ids
+    is as unidentifiable as none: the caller must take the conservative path.
+    """
+    import urllib.parse
+    text = str(value or '').strip()
+    found = set()
+    match = re.search(r'(?:^|/)entry/([^/?#]+)', text, re.IGNORECASE)
+    if match:
+        entry = _valid_entry_id(urllib.parse.unquote(match.group(1)))
+        if entry:
+            found.add(entry)
+    query = urllib.parse.urlsplit(text).query
+    if query:
+        for key in ('entry_id', 'config_entry_id'):
+            for item in urllib.parse.parse_qs(query).get(key, []):
+                entry = _valid_entry_id(item)
+                if entry:
+                    found.add(entry)
+    _entry_ids_in(payload, found)
+    return found.pop() if len(found) == 1 else ''
 
 
 class AllowanceError(ValueError):
@@ -1729,6 +1826,57 @@ def on_config_restore(actor, path):
         'allowance_config_write_scanned',
         details='%s: restore content unmapped, suspended all (%d)' % (path, n))
     return {'suspended': n, 'reason': 'config_write_unmapped'}
+
+
+def on_config_entry_write(actor, path, payload=None):
+    """BZ3: a config-entry write suspends the allowances it can redefine.
+
+    An options-flow edit changes what an entity does without changing its
+    registry id, so a pin refresh sees nothing. Read the registry and suspend
+    every live allowance whose entities belong to the written entry. When the
+    write does not name exactly one entry, or the registry cannot be read,
+    suspend every HA allowance: the same conservative branch as AZ2.
+    """
+    from db.audit import record_audit_event
+    entry_id = config_entry_id_from_write(path, payload)
+    if not entry_id:
+        n = _suspend_all(
+            actor, 'config_entry_changed',
+            'config-entry write %s (entry not identifiable)' % path)
+        record_audit_event(
+            'allowance_config_entry_suspended',
+            details='%s: no single entry id, suspended all (%d)' % (path, n))
+        return {'suspended': n, 'reason': 'config_entry_changed',
+                'entry_id': ''}
+    try:
+        registry = _ha_registry()
+    except AllowanceError as exc:
+        n = _suspend_all(
+            actor, 'config_entry_changed',
+            'config-entry write %s (registry unreadable)' % path)
+        record_audit_event(
+            'allowance_config_entry_suspended',
+            details='%s: registry unreadable (%s), suspended all (%d)'
+                    % (path, str(exc)[:120], n))
+        return {'suspended': n, 'reason': 'config_entry_changed',
+                'entry_id': entry_id, 'error': str(exc)}
+    entities = {
+        ent for ent, reg in registry.items()
+        if str((reg or {}).get('config_entry_id') or '') == entry_id
+    }
+    count = 0
+    for row in _live_ha_allowances():
+        if row['suspended_at']:
+            continue
+        if _stored_entities(row) & entities:
+            suspend_allowance(actor, row['id'], 'config_entry_changed')
+            count += 1
+    record_audit_event(
+        'allowance_config_entry_suspended',
+        details='%s: entry %s maps %d entity id(s), suspended %d allowance(s)'
+                % (path, entry_id, len(entities), count))
+    return {'suspended': count, 'reason': 'config_entry_changed',
+            'entry_id': entry_id, 'entities': sorted(entities)}
 
 
 def on_config_write_failed(actor, path, exc):

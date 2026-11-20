@@ -388,21 +388,38 @@ def resolve_session(explicit: str = ''):
     return transport, ('transport' if transport else '')
 
 
-def note_ha_registry_write(integration, value):
-    """BX2: re-read every pin straight after an approved registry write.
+def note_ha_registry_write(integration, value, payload=None):
+    """BX2/BZ3: react on the approval's own turn to an HA registry write.
 
-    An entity-registry rename (or a config-entry write) can give `switch.x` a
-    new meaning. The periodic refresh would catch it up to five minutes later;
-    this runs it on the approval's own turn.
+    An entity-registry rename changes a pinned registry id, so the pins are
+    re-read. A config-entry write instead redefines the entities that belong
+    to one entry without moving their registry ids: suspend those allowances
+    (or every HA allowance when the entry cannot be identified).
     """
     if not integration or (integration.get('kind') or '').lower() != 'ha':
         return
     try:
         from core import allowances
-        if allowances.is_registry_write_path(value):
+        if allowances.is_config_entry_write_path(value):
+            allowances.on_config_entry_write('config-entry-write', value, payload)
+        elif allowances.is_registry_write_path(value):
             allowances.refresh_pins('config-write')
-    except Exception:
-        pass
+    except Exception as exc:
+        # CB4: never leave allowances live after a failed suspension. Reuse
+        # the AZ2 fail-closed path (suspend every HA allowance and write one
+        # failure audit row); only a second failure is logged here.
+        try:
+            from core import allowances
+            allowances.on_config_write_failed(
+                'config-entry-write', value, exc)
+        except Exception:
+            try:
+                from db.audit import record_audit_event
+                record_audit_event(
+                    'allowance_config_entry_hook_failed',
+                    details='%s: %s' % (value, str(exc)[:200]))
+            except Exception:
+                pass
 
 
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
@@ -615,7 +632,10 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
                                   agent=agent_name, tool_name=tool_name,
                                   session_id=session_id, execution_id=execution_id,
                                   reason=exec_reason, approval=approval_label)
-            note_ha_registry_write(integration, command)
+            # CB3: a WS read (config_entries/get, list, subscribe, ...) must
+            # not run the config-entry suspension hook.
+            if mutating:
+                note_ha_registry_write(integration, command, payload)
             return out
         if generic:
             out = execute_generic_call(
@@ -626,7 +646,11 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
                 reason=exec_reason, approval=approval_label,
                 read_only=not mutating)
             if mutating:
-                note_ha_registry_write(integration, args.get('path'))
+                # CB3 nit: keep both, so an entry id in params is not lost
+                # when data is present. Two ids then read as ambiguous.
+                note_ha_registry_write(
+                    integration, args.get('path'),
+                    {'data': args.get('data'), 'params': args.get('params')})
             return out
         return execute_integration_call(integration, tool, args, agent=agent_name,
                                         session_id=session_id, execution_id=execution_id,
