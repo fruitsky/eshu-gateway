@@ -10862,6 +10862,64 @@ Nit: two items in the same list whose first lines are identical (two
 between them. Adding the item's position among identical siblings would
 close it. Acceptable to leave.
 
+### Security: includes round 3 (e7a5e32)
+
+Read as code text only; nothing was run.
+
+**Approved once CB16 is fixed.**
+
+**What holds.**
+
+* **CB12.** A `- ` line at the same indentation as a `key:` line with no
+  value stays that key's child. A following key at that indentation pops
+  both.
+* **CB13, block bodies.**
+  * Bodies opened by `key: |`, `- key: |` and `- |` are skipped by YAML's
+    own rule. The opener's column is the key's column after any `- `
+    prefixes, or the dash's column for `- |`.
+  * The first content line sets the indent, and an under-indented body
+    line is refused.
+  * `|1`-style indicators can only make the walker skip less than YAML
+    does, which is the safe direction.
+  * A block value carrying a tag or an anchor is not skipped, which is
+    stricter.
+* **CB13, open quotes.** A line that ends inside an open quote is
+  refused, and that check runs after block bodies are skipped, so
+  apostrophes in templates are fine.
+
+**CB16 (must). When a quote opens is still not YAML's rule.**
+
+* `_quote_opens` lets a quote open whenever the previous character is
+  not a letter, digit, `_` or `-`.
+* In YAML a quote opens a scalar only where a scalar can start. A quote
+  after `.`, `/`, `(` or `:` in the middle of a plain scalar is just
+  text.
+* In a flow collection the walker can therefore pair two such quotes
+  that YAML treats as text inside two separate plain items. Everything
+  between them, including a real tag in a flow item, is skipped.
+* The opposite mistake is just as bad. Missing a real opening quote lets
+  a ` #` inside the string strip the rest of the line as a comment.
+
+Fix: open a quote only where YAML starts a scalar.
+
+* Allowed positions:
+  * at the line's first non-space character, or after a `- ` or `? `
+    indicator;
+  * after `: ` (or `:` at the end of a key);
+  * after `[`, `{` or `,` in a flow collection, allowing spaces;
+  * after an `&anchor` or `!tag` property and a space.
+* Anywhere else a quote is a plain character.
+* Test both directions: a quote inside a plain flow item must not hide
+  the next item, and a real quoted flow item containing ` #` must not
+  strip the rest of the line.
+* Keep the fixtures in tests only.
+
+Nit: a list at the same indentation as a key whose value is only an
+anchor or a tag (`key: &a`) still pops that key. In a file with a
+grandfathered include, such a list item can lose its top-level key. Treat
+a value made only of `&anchor` and `!tag` properties like an empty value
+in `_mapping_key_without_value`.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
