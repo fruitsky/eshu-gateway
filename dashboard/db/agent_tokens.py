@@ -76,26 +76,19 @@ def get_agent_by_token(raw_token: str):
         return dict(row) if row else None
 
 
-def rename_agent_token(agent_id: int, name: str):
-    """Rename one agent token, refusing a reserved or duplicate name."""
-    name = validate_agent_name(name)
+def list_reserved_agent_names():
+    """Existing agents whose names are reserved for operator labels.
+
+    Creation refuses these names, but an agent made before that check can
+    still carry one. The caller audits the list; nothing is renamed.
+    """
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT id, name FROM agent_tokens WHERE id = ?',
-                       (int(agent_id),))
-        row = cursor.fetchone()
-        if not row:
-            return None
         cursor.execute(
-            'SELECT id FROM agent_tokens WHERE name = ? AND id != ?',
-            (name, int(agent_id)))
-        if cursor.fetchone():
-            raise ValueError(f"An agent named '{name}' already exists")
-        cursor.execute('UPDATE agent_tokens SET name = ? WHERE id = ?',
-                       (name, int(agent_id)))
-        conn.commit()
-        return {'id': int(agent_id), 'old_name': row['name'],
-                'name': name}
+            'SELECT name FROM agent_tokens WHERE lower(name) IN (%s) '
+            'ORDER BY id ASC' % ','.join('?' * len(RESERVED_AGENT_NAMES)),
+            tuple(sorted(RESERVED_AGENT_NAMES)))
+        return [row['name'] for row in cursor.fetchall()]
 
 
 def get_agent_by_name(name: str):

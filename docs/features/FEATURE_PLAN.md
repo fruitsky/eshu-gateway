@@ -22896,6 +22896,13 @@ device grid and the Agents-tab banner ("N waiting · Review"). Accept calls
 clears `pending_json` through the new audited `dismiss-join` endpoint. The
 Rules tab carries a short "How permissions work" panel.
 
+**Deferred after the major release.** Agent-token rename is not part of this
+branch. Names are still live lookup keys (sessions, the pre-check, pending
+calls, the gateway SSH request's approval decision, web_fetch principals and
+`principal_allow`), so its own chunk must first move those lookups to agent id,
+or refuse any name that ever existed. Creation still refuses reserved names,
+and startup audits any agent that already carries one.
+
 ### Security review of the server part (security reviewer, 2026-11-19, `feat/ha-files-ui` @ a2bfb3d)
 
 **Approved once CB9 is in. It is small.** Code text read only; nothing was
