@@ -21882,6 +21882,36 @@ approved each window. The migration masks one field, not the history.
 
 ---
 
+### Security: gateway logs carry `token_fp` (`fix/bugs-release` @ c4a81d6)
+
+Read line by line as code text; nothing was run. **Approved.**
+
+* `ESHU_WINDOW_TOKEN_FP` is the first eight hex characters of the
+  SHA-256 of the token, the same `token_fp` the dashboard stores.
+  * The token goes in on stdin through `printf '%s'`, so it is never in
+    any process's argv.
+  * The token is already limited to `[A-Za-z0-9]{1,64}` by
+    `check_charset`, so `printf` sees no format characters.
+* All four `logger` lines (expired, claim unreachable, claim rejected,
+  match) now log only `token_fp`. No other `logger` line in the feature
+  file uses the token.
+* Two other places still carry the raw token, and both are outside argv
+  and syslog:
+  * the claim body, sent on stdin;
+  * `log_window_reject`'s body to `/api/log`, also on stdin, which the
+    dashboard reduces to `token_fp`.
+* With no `pipefail`, a gateway without `sha256sum` logs an empty
+  `token_fp=` and keeps working.
+* The NPM mock change is test-only.
+
+Nits:
+
+1. Log `token_fp=unknown` when the hash is empty, so the line still
+   parses the same way.
+2. Rollout: the feature file is fetched at install. A gateway keeps
+   logging the 8-character token prefix until it is reinstalled, so say
+   so in the release notes. Prefixes already in old syslog stay there.
+
 ## Chunk X11 — Agents and allowances, redesigned around the agent · slug `agents-allowances-redesign` · dashboard UI + small API · **security reads the API part (S1–S4)**
 
 Requested 2026-11-17 by the operator: "that Allowances page is awful. I can't
