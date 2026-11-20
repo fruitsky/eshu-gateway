@@ -23143,4 +23143,4 @@ that ever existed.
 
 Nit: an agent created before this change can already carry a reserved
 name. List any such agent once at startup in an audit row, so the
-operator can rename it by hand.
+operator can replace it with a new agent.
