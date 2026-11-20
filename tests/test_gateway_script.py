@@ -1494,7 +1494,22 @@ def test_bj2_the_window_claim_keeps_both_tokens_off_argv(gw):
 def test_bj3_the_window_token_is_not_logged_in_full(gw):
     src = (REPO / "dashboard" / "static" / "features" / "approved_windows.sh").read_text()
     assert "token=$ESHU_WINDOW_TOKEN" not in src
-    assert "${ESHU_WINDOW_TOKEN:0:8}" in src
+    assert "${ESHU_WINDOW_TOKEN:0:8}" not in src
+    assert "token_fp=${ESHU_WINDOW_TOKEN_FP}" in src
+
+
+def test_bj3_gateway_logs_the_dashboard_token_fp_not_the_token(gw):
+    token = "WINDOWSECRET" + "A" * 20
+    gw.approved_windows("%s|echo window-ok|0|0|0|0|0|exact" % token)
+    proc = gw.run("ESHU_WINDOW_TOKEN=%s echo window-ok" % token)
+    assert "window-ok" in proc.stdout
+    assert proc.returncode == 0
+    fp = hashlib.sha256(token.encode('utf-8')).hexdigest()[:8]
+    lines = [line for line in gw.logger_text().splitlines() if "WINDOW" in line]
+    assert lines and any("token_fp=" + fp in line for line in lines)
+    for line in lines:
+        for part in (token, token[:8], token[-8:], token[:16], token[-16:]):
+            assert part not in line, line
 
 
 # ── Chunk 5: window claim fails open only on network loss ─────────────────
