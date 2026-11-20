@@ -382,6 +382,27 @@ class TestWindows:
             r = getattr(client, method)(path, json={}, headers=setup['headers'])
             assert r.status_code == 403, (method, path, r.text)
 
+    def test_the_approver_reads_its_own_window_without_a_token(
+            self, setup, client):
+        wr = create_window_request(
+            GATEWAY, 'hostname', expires_at=int(time.time()) + 600,
+            max_executions=1, session_id='e2e-session',
+            agent_id=setup['agent_id'])
+        r = client.get('/api/e2e/windows/%d' % wr['id'],
+                       headers=setup['headers'])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['execution_count'] == 0
+        assert body['target_ip'] == GATEWAY
+        assert 'token' not in body
+        foreign = create_window_request(
+            GATEWAY, 'hostname', expires_at=int(time.time()) + 600,
+            max_executions=1, session_id='e2e-session',
+            agent_id=999999)
+        r = client.get('/api/e2e/windows/%d' % foreign['id'],
+                       headers=setup['headers'])
+        assert r.status_code == 403
+
     def test_agent_window_request_records_attribution(self, setup, client):
         now = int(time.time())
         r = client.post('/api/window-requests', headers={

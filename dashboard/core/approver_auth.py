@@ -35,6 +35,7 @@ _ALLOWED = (
     ('GET', r'/api/agents'),
     ('GET', r'/api/agents/\d+/activity'),
     ('GET', r'/api/e2e/installer-hash'),
+    ('GET', r'/api/e2e/windows/\d+'),
 )
 _ALLOWED = tuple((m.upper(), re.compile(p + r'$')) for m, p in _ALLOWED)
 
