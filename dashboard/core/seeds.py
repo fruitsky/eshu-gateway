@@ -81,6 +81,20 @@ NO_GENERIC_KINDS = {'pihole', 'npm', 'seerr', 'webfetch', 'trains', 'commute',
                     'ha_ssh'}
 
 
+def seed_label(kind: str, name: str) -> str:
+    """The curated display label for a seeded tool, or '' when it has none.
+
+    X11 Stage 4 shows a plain name above every tool. The label lives in the
+    seed catalog, next to the tool it describes, so the agent page and the
+    catalogue cannot drift. Tools without a label fall back to a humanised
+    name in the UI.
+    """
+    for tool in _CATALOGS.get(kind or 'custom', []):
+        if tool.get('name') == name:
+            return str(tool.get('label') or '')
+    return ''
+
+
 def seed_tool_names(kind: str) -> set:
     """Names of the tools that seeding would create/re-create for a kind —
     the curated catalog plus the generic floor (where applicable). Used to flag

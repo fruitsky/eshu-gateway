@@ -9,6 +9,7 @@ write and restore tools are always approval-gated.
 HA_SSH_SEED_TOOLS = [
     {
         'name': 'ha_config_list',
+        'label': 'List files',
         'description': (
             'List the YAML files under /config and /config/packages on the '
             'Home Assistant SSH add-on, with size and mtime. Read-only. The '
@@ -25,6 +26,7 @@ HA_SSH_SEED_TOOLS = [
     },
     {
         'name': 'ha_config_read',
+        'label': 'Read a file',
         'description': (
             'Read one YAML file under /config or /config/packages: content, '
             'sha256 and size. secrets.yaml returns key names with values '
@@ -45,6 +47,7 @@ HA_SSH_SEED_TOOLS = [
     },
     {
         'name': 'ha_config_write',
+        'label': 'Write a file',
         'description': (
             'Replace one YAML file: one remote script backs up the current '
             'file, writes the new content atomically, keeps its mode/owner, '
@@ -68,6 +71,7 @@ HA_SSH_SEED_TOOLS = [
     },
     {
         'name': 'ha_config_restore',
+        'label': 'Restore a backup',
         'description': (
             'Restore one .eshu-<timestamp>.bak for a YAML path, then run '
             'ha core check; a failed check puts the previous content back. '
@@ -86,6 +90,7 @@ HA_SSH_SEED_TOOLS = [
     },
     {
         'name': 'ha_config_check',
+        'label': 'Check the config',
         'description': (
             'Run ha core check on the add-on. A valid result is recorded for '
             'the next ha_core_restart (10-minute window, shared with F10\'s '

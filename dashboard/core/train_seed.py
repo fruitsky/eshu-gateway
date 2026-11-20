@@ -9,6 +9,7 @@ from __future__ import annotations
 TRAIN_SEED_TOOLS = [
     {
         "name": "train_plan",
+        "label": "Plan a journey",
         "description": (
             "Plan a train journey between two UK stations. Use this for any "
             "'how do I get to X by Y' or 'what trains are there' question. Ask "
@@ -59,6 +60,7 @@ TRAIN_SEED_TOOLS = [
     },
     {
         "name": "train_status",
+        "label": "Line status",
         "description": (
             "Current TfL line status and disruption text for one or more lines "
             "(comma-separated; default southeastern). Use this for 'are there "

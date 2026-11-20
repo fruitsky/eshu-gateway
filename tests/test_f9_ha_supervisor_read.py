@@ -101,6 +101,48 @@ class TestFreezeCoversIntegrations:
             clear_trigger_freeze()
         assert 'frozen' not in out
 
+    @pytest.mark.parametrize('case', ['always', 'agent_gated', 'gate_all'])
+    def test_f9_frozen_dry_run_keeps_the_same_gate(self, ha, monkeypatch, case):
+        from core.agent_context import reset_current_agent, set_current_agent
+        from core.agent_policy import static_tool_decision
+        from db.agent_policies import get_agent_policy, set_agent_policy
+        from db.agent_tokens import create_agent_token, get_agent_by_token
+        from db.integrations import get_pending_calls, get_tool, update_integration
+
+        agent = None
+        if case == 'agent_gated':
+            _raw, agent_id = create_agent_token('freeze-dry-run')
+            set_agent_policy(agent_id, approval={'ha_lovelace_save_config': 'gated'})
+            agent = get_agent_by_token(_raw)
+            agent['policy'] = get_agent_policy(agent_id)
+        if case == 'gate_all':
+            update_integration('ha', gate_mode='all')
+        tool = get_tool('ha', 'lovelace_save_config')
+        unfrozen = static_tool_decision(agent, get_integration('ha'),
+                                        'lovelace_save_config', tool)
+        frozen = static_tool_decision(agent, get_integration('ha'),
+                                      'lovelace_save_config', tool,
+                                      frozen=True)
+        assert frozen['should_gate'] == unfrozen['should_gate']
+        assert frozen['outcome'] == unfrozen['outcome']
+        assert frozen['frozen'] is True
+        assert frozen['should_gate'] is True
+
+        _patch_ws(monkeypatch, result={'title': 'Home', 'views': []})
+        token = set_current_agent(agent) if agent else None
+        set_trigger_freeze()
+        try:
+            out = run_tool('ha', 'lovelace_save_config',
+                           {'url_path': 'water-monitor', 'ops': [],
+                            'dry_run': True})
+        finally:
+            clear_trigger_freeze()
+            if token is not None:
+                reset_current_agent(token)
+        data = json.loads(out)
+        assert 'frozen' not in data and data.get('status') != 'pending'
+        assert get_pending_calls() == []
+
     def test_f9_freeze_refuses_the_approval(self, ha, auth_client):
         call_id = create_pending_call(
             'ha', 'call_service',

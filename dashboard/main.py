@@ -176,7 +176,8 @@ from core.mcp_server import (
     session_managers,
     MCP_MODES,
 )
-from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
+from core.seeds import (seed_for_kind, reseed_all_integrations, seed_label,
+                         seed_tool_names)
 from core.train_seed import ensure_train_integration
 from core.commute_seed import ensure_commute_integration
 
@@ -4644,7 +4645,10 @@ def available_agent_tools(agent_id: int, request: Request):
             tools.append({
                 'name': f"{ns}_{tool['name']}",
                 'tool': tool['name'],
+                'label': seed_label(integration.get('kind') or 'custom',
+                                    tool['name']),
                 'description': tool.get('description') or '',
+                'params': tool.get('params') or [],
                 'read_only': bool(tool.get('read_only')),
                 'enabled': bool(tool.get('enabled')),
                 'always_gate': bool(tool.get('always_gate')),
@@ -4653,9 +4657,26 @@ def available_agent_tools(agent_id: int, request: Request):
         out.append({
             'integration': integration['name'],
             'kind': integration.get('kind') or 'custom',
+            'gate_mode': (integration.get('gate_mode') or 'destructive').lower(),
             'tools': tools,
         })
     return {'integrations': out}
+
+
+@app.get("/api/agents/{agent_id}/tools-summary")
+def agent_tools_summary_endpoint(agent_id: int, request: Request):
+    """X11 Stage 4: one read-only summary for the Tools overview.
+
+    Operator session only. It counts the same outcomes the tool rows show, so
+    the sentence, the tiles and the Overview ledger cannot disagree.
+    """
+    _check_session(request)
+    from core import agent_tools_summary
+    try:
+        return agent_tools_summary.build(agent_id)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
 
 
 @app.get("/api/agents/{agent_id}/ha-permissions")

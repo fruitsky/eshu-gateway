@@ -70,6 +70,7 @@ def _build_catalog(kind: str) -> list:
     reads = [
         {
             "name": "system_status",
+            "label": "System status",
             "description": "Version + status of this *arr app (appName, version, branch, isDocker, startTime). Use this to confirm the Sonarr/Radarr major version.",
             "method": "GET",
             "path_template": "/api/v3/system/status",
@@ -81,6 +82,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": series_tool,
+            "label": "Series" if sonarr else "Movies",
             "description": f"List {plural} (id, title, year, status, monitored, qualityProfileId, language, path, tags, statistics). Raw payloads are heavy — projected compact. Use search (title substring) and limit; full=true adds overview/added.",
             "method": "GET",
             "path_template": series_path,
@@ -94,6 +96,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "queue",
+            "label": "Download queue",
             "description": "Download queue (paginated). total + records with id, title, status, trackedDownloadStatus, errorMessage, sizeleft, timeleft — the stuck-download diagnosis.",
             "method": "GET",
             "path_template": "/api/v3/queue",
@@ -108,6 +111,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "history",
+            "label": "History",
             "description": history_desc,
             "method": "GET",
             "path_template": "/api/v3/history",
@@ -125,6 +129,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "quality_profiles",
+            "label": "Quality profiles",
             "description": "Quality profiles (id, name, cutoff, items with allowed flags). Powers the language/dub profile workflows.",
             "method": "GET",
             "path_template": "/api/v3/qualityprofile",
@@ -136,6 +141,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "custom_formats",
+            "label": "Custom formats",
             "description": "Custom formats (id, name, includeCustomFormatWhenRenaming, specifications: implementation + negate). Use search by name. full=true adds each specification's `fields` (the regex values — an array of {name, value} in v4).",
             "method": "GET",
             "path_template": "/api/v3/customformat",
@@ -150,6 +156,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "languages",
+            "label": "Languages",
             "description": "Language id -> name map (id, name). PT-PT = 18 and PT-BR = 33 in Sonarr v4, but read the live list to be sure. Radarr exposes movie languages.",
             "method": "GET",
             "path_template": "/api/v3/language",
@@ -161,6 +168,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "rootfolders",
+            "label": "Root folders",
             "description": "Root folders (id, path, accessible, freeSpace) — quick disk-capacity check for the *arr media paths.",
             "method": "GET",
             "path_template": "/api/v3/rootfolder",
@@ -172,6 +180,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "command_status",
+            "label": "Command status",
             "description": "Poll a previously-run command by id (from a command write). Returns id, name, status (queued/started/completed/failed), started, ended, duration. Command POSTs are fire-and-forget — poll this to confirm completion.",
             "method": "GET",
             "path_template": "/api/v3/command/{id}",
@@ -189,6 +198,7 @@ def _build_catalog(kind: str) -> list:
     if sonarr:
         reads.append({
             "name": "episodes",
+            "label": "Episodes",
             "description": "List episodes for a series (id, seasonNumber, episodeNumber, title, episodeFileId, hasFile, monitored, airDate). `search` filters on title, `limit` caps the list.",
             "method": "GET",
             "path_template": "/api/v3/episode",
@@ -204,6 +214,7 @@ def _build_catalog(kind: str) -> list:
         })
         reads.append({
             "name": "episode_files",
+            "label": "Episode files",
             "description": "Episode files for a series with per-file media info — sceneName, releaseGroup, languages, quality, customFormats + customFormatScore, and mediaInfo (audioCodec, audioStreamCount, subtitles, resolution, runTime). This is the file that distinguishes an Audio-Description rip from a normal one. `search` filters sceneName; `full` adds size/path/dateAdded.",
             "method": "GET",
             "path_template": "/api/v3/episodefile",
@@ -220,6 +231,7 @@ def _build_catalog(kind: str) -> list:
     else:
         reads.append({
             "name": "movie_files",
+            "label": "Movie files",
             "description": "Movie files for a movie with per-file media info — sceneName, releaseGroup, languages, quality, customFormats + customFormatScore, and mediaInfo (audioCodec, audioStreamCount, subtitles, resolution, runTime). `search` filters sceneName; `full` adds size/path/dateAdded.",
             "method": "GET",
             "path_template": "/api/v3/moviefile",
@@ -235,6 +247,7 @@ def _build_catalog(kind: str) -> list:
         })
     reads.append({
         "name": "release_search",
+        "label": "Release search",
         "description": "⚠️ SLOW — triggers live indexer queries and can take up to ~60s. Search indexers for releases for ONE episode/movie. Returns per release: title, size, quality, indexer, seeders, customFormatScore, rejected, and rejections. The rejections are the definitive \"why didn't it grab/upgrade\" evidence (e.g. \"Existing file on disk has a equal or higher Custom Format score\"). READ-ONLY: does NOT grab. Do not call in a tight loop.",
         "method": "GET",
         "path_template": "/api/v3/release",
@@ -268,6 +281,7 @@ def _build_catalog(kind: str) -> list:
              "required": False, "default": True})
     reads.append({
         "name": "wanted_missing",
+        "label": "Missing episodes",
         "description": (
             "List monitored episodes that are missing a file (the Sonarr "
             "'wanted/missing' view). Returns totalRecords + compact records "
@@ -311,6 +325,7 @@ def _build_catalog(kind: str) -> list:
     writes = [
         {
             "name": add_name,
+            "label": "Add",
             "description": f"Add a {singular} to this *arr app. `body` is the full {singular} object (GET one first for the exact shape). ⚠️ GUARDRAIL: {search_flag} defaults FALSE and is server-merged — a search triggers torrent grabs; only pass true deliberately. REQUIRES OPERATOR APPROVAL.",
             "method": "POST",
             "path_template": series_path,
@@ -325,6 +340,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": update_name,
+            "label": "Update",
             "description": f"Update a {singular} by id. `body` must be the FULL {singular} object (v4 validates the whole payload; partial PUTs 400) — GET the {singular} first, mutate one field, PUT it back. REQUIRES OPERATOR APPROVAL.",
             "method": "PUT",
             "path_template": series_path + "/{id}",
@@ -339,6 +355,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "command",
+            "label": "Run a command",
             "description": "Run a named *arr command (POST /api/v3/command) — e.g. RefreshSeries, RescanSeries, EpisodeSearch, MovieSearch, RSS Sync. `name` is required; `data` is an optional JSON object of the command's params (e.g. seriesId, episodeIds). ⚠️ EpisodeSearch/MovieSearch trigger real torrent searches — be deliberate. Fire-and-forget: poll command_status for completion. REQUIRES OPERATOR APPROVAL.",
             "method": "POST",
             "path_template": "/api/v3/command",
@@ -368,6 +385,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": delete_name,
+            "label": "Delete",
             "description": f"Delete a {singular} by id. ⚠️ deleteFiles defaults FALSE (removes only the arr entry). deleteFiles=true DELETES MEDIA FROM DISK — explicit only. REQUIRES OPERATOR APPROVAL.",
             "method": "DELETE",
             "path_template": series_path + "/{id}",

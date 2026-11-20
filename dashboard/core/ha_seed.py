@@ -8,6 +8,7 @@ Integrations UI's "Seed" action.
 HA_SEED_TOOLS = [
     {
         "name": "list_entities",
+        "label": "List entities",
         "description": "List all Home Assistant entities and their current state (entity_id, state, friendly name). Use search to filter by entity_id substring, and limit to bound the result. Use this to discover entity ids.",
         "method": "GET",
         "path_template": "/states",
@@ -19,6 +20,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "get_entity",
+        "label": "Get an entity",
         "description": "Get a single entity's full state and attributes (e.g. light.living_room).",
         "method": "GET",
         "path_template": "/states/{entity_id}",
@@ -31,6 +33,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "call_service",
+        "label": "Call a service",
         "description": "Call a Home Assistant service (e.g. light.turn_on, light.turn_off, climate.set_temperature, switch.toggle). Pass service data as a JSON object. REQUIRES OPERATOR APPROVAL unless the calling agent has an explicit ungated policy (the operator may scope an agent to household domains).",
         "method": "POST",
         "path_template": "/services/{domain}/{service}",
@@ -45,6 +48,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_services",
+        "label": "List services",
         "description": "List every Home Assistant service with its field schema (names, types, required/optional) — learn the exact fields a service accepts before calling it. Returns the full schema map.",
         "method": "GET",
         "path_template": "/services",
@@ -55,6 +59,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "get_config",
+        "label": "Home Assistant setup",
         "description": "Get the Home Assistant core configuration (location, units, timezone, version).",
         "method": "GET",
         "path_template": "/config",
@@ -65,6 +70,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "get_history",
+        "label": "History",
         "description": "Get the recorded state history for an entity (or all) from a start time (ISO8601). filter_entity_id narrows to one entity; end_time bounds the window. Returns the raw history (list of per-entity state lists).",
         "method": "GET",
         "path_template": "/history/period/{start}",
@@ -79,6 +85,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_entity_registry",
+        "label": "Entity registry",
         "description": "List the Home Assistant entity registry — ALL registered entities, including disabled/hidden ones /api/states never shows. Use device_id to get every entity of one device, search to filter by entity_id substring, limit to bound. disabled_by (null/'integration'/'user') distinguishes a disabled entity from one never created.",
         "method": "GET",
         "path_template": "config/entity_registry/list",
@@ -92,6 +99,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_device_registry",
+        "label": "Device registry",
         "description": "List the Home Assistant device registry — every device with manufacturer, model, identifiers, connections, and via_device_id (what it joins through). Use search to filter by device name substring, limit to bound.",
         "method": "GET",
         "path_template": "config/device_registry/list",
@@ -104,6 +112,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_dashboards",
+        "label": "Dashboards",
         "description": "List the Home Assistant Lovelace dashboards as a compact inventory: dashboard_id, url_path, title, icon, mode, show_in_sidebar, require_admin (filename for YAML-mode dashboards). Use this to discover url_path (for config reads/writes) and dashboard_id (for update/delete). Pass full=true for the raw rows.",
         "method": "GET",
         "path_template": "",
@@ -118,6 +127,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_dashboard",
+        "label": "Dashboard",
         "description": "Read ONE Lovelace dashboard config, summarised by default (top_level_keys + per-view card list with best-effort entity/statistic targets) so a large dashboard never floods context. Identify the dashboard by url_path; pass full=true for the verbatim config (with size_bytes/truncated), or view=<index|path|title> to narrow to one view. Cards may reference external statistic ids like 'thames_water:thameswater_consumption' — these are collected, never validated.",
         "method": "GET",
         "path_template": "",
@@ -135,6 +145,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_create_dashboard",
+        "label": "Create a dashboard",
         "description": "Create a storage-mode Lovelace dashboard. url_path must contain a hyphen (-) unless allow_single_word is true. Pre-flights the existing dashboards and returns ha_dashboard_url_exists with the existing dashboard_id instead of failing upstream; returns the created item (incl. dashboard_id) and verifies it appears in the list. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -155,6 +166,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_update_dashboard",
+        "label": "Update a dashboard",
         "description": "Update a Lovelace dashboard's metadata (title, icon, show_in_sidebar, require_admin). Identify it by dashboard_id OR url_path (the url_path -> dashboard_id mapping is resolved server-side). YAML-mode dashboards are refused. Returns the updated item. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -195,6 +207,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_delete_dashboard",
+        "label": "Delete a dashboard",
         "description": "Delete a storage-mode Lovelace dashboard by dashboard_id OR url_path. Deleting a storage dashboard also removes its stored config (HA cleans it up), so no orphan is left. YAML-mode dashboards are refused (they are file-backed). Verifies the dashboard is gone and reports dashboard_id/url_path. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -324,6 +337,7 @@ HA_SEED_TOOLS = [
     # core/ha_supervisor.SUPERVISOR_ACTIONS; the agent never supplies one.
     {
         "name": "ha_addon_action",
+        "label": "Add-on action",
         "description": "Start, stop or restart one Home Assistant add-on by slug. The action is one of start, stop, restart. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -388,6 +402,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "ha_core_restart",
+        "label": "Restart Home Assistant",
         "description": "Restart Home Assistant Core. Refused unless ha_check_config ran on this integration in the last 10 minutes and returned valid. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -401,6 +416,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "ha_host_reboot",
+        "label": "Reboot the host",
         "description": "REBOOTS THE WHOLE HOME ASSISTANT HOST. Every add-on, every automation and the dashboard itself stop until the machine is back. Seeded disabled; the operator must enable the tool first. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
@@ -415,6 +431,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "ha_check_config",
+        "label": "Check the config",
         "description": "Validate the Home Assistant configuration now (POST /api/config/core/check_config). Read-only in effect: it validates and changes nothing. Returns result (valid/invalid) plus errors and warnings, and records the result so ha_core_restart can require a recent valid check.",
         "method": "POST",
         "path_template": "/config/core/check_config",

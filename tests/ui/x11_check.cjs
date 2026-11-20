@@ -1,6 +1,6 @@
-/* X11 Stage 3 browser check: tabs, one-section editor, deep links, danger zone,
- * grouped device grid, the Check preview, JSON and the 390 px layout.
- * Synthetic data only; run against tests/ui/serve_ui.py.
+/* X11 Stage 4 browser check: integration tiles, per-integration pages, the
+ * Home Assistant tabs, the device pill cycle, the Overview ledger and the
+ * 390 px layout. Synthetic data only; run against tests/ui/serve_ui.py.
  */
 'use strict';
 
@@ -27,9 +27,25 @@ async function login(context) {
     data: { password: PASSWORD }, headers: { 'X-Eshu-CSRF': '1' } });
   if (!r.ok()) throw new Error('login failed: HTTP ' + r.status());
 }
-async function openAgents(page) {
+async function openFirstAgent(page) {
   await page.evaluate(() => switchView('agents'));
   await page.waitForTimeout(900);
+  await page.locator('[data-agent-card]').first().click();
+  await page.waitForTimeout(1200);
+  return page.evaluate(() => x11State.agent.id);
+}
+async function gotoHash(page, hash) {
+  await page.goto(BASE + hash, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1100);
+}
+async function cancelPreview(page) {
+  const modal = page.locator('#x11-preview-modal');
+  if (!(await modal.isVisible())) {
+    failures.push('preview: no Cancel button; the preview did not open');
+    return;
+  }
+  await modal.locator('button', { hasText: 'Cancel' }).click();
+  await page.waitForTimeout(250);
 }
 async function scrollMain(page, bottom) {
   await page.evaluate((toBottom) => {
@@ -39,347 +55,490 @@ async function scrollMain(page, bottom) {
   }, bottom);
   await page.waitForTimeout(150);
 }
-async function openGroup(page, name) {
-  const d = page.locator('details[data-tool-group="' + name + '"]');
-  if (!(await d.evaluate((e) => e.open))) await d.locator('summary').click();
-  await page.waitForTimeout(200);
-}
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 950 } });
   const errors = [];
-  let dangerDismissed = false;
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
-  page.on('dialog', (d) => {
-    if (/Revoke this token/.test(d.message())) { dangerDismissed = true; d.dismiss(); }
-    else d.accept();
-  });
+  page.on('dialog', (d) => d.accept());
   const bodies = [];
   page.on('request', (r) => {
     if (r.method() !== 'PUT' || !/\/api\/agents\/\d+\/config$/.test(r.url())) return;
     try { bodies.push(JSON.parse(r.postData())); } catch (e) { /* ignore */ }
   });
   await login(page.context());
+  // Two integrations created after startup carry no tools, so "Not connected"
+  // and the phone fold are visible without a synthetic seed that the server
+  // would immediately fill with the generic passthrough tools.
+  for (const name of ['Empty shelf', 'Spare box']) {
+    const r = await page.context().request.post(BASE + 'api/integrations', {
+      data: { name, base_url: 'http://192.0.2.71', auth_type: 'none',
+        kind: 'custom' },
+      headers: { 'X-Eshu-CSRF': '1' } });
+    if (!r.ok()) {
+      const body = await r.json().catch(() => ({}));
+      if (!/already exists/.test(String(body.detail || ''))) {
+        throw new Error('could not create ' + name + ': HTTP ' + r.status());
+      }
+    }
+  }
+  // One seeded custom integration gives a generic `write` with the default
+  // destructive gate: its row must say "Depends on the call", not "Asks".
+  const generic = await page.context().request.post(BASE + 'api/integrations', {
+    data: { name: 'Generic lab', base_url: 'http://192.0.2.72',
+      auth_type: 'none', kind: 'custom' },
+    headers: { 'X-Eshu-CSRF': '1' } });
+  if (!generic.ok()) {
+    const body = await generic.json().catch(() => ({}));
+    if (!/already exists/.test(String(body.detail || ''))) {
+      throw new Error('could not create Generic lab: HTTP ' + generic.status());
+    }
+  }
+  await page.context().request.post(
+    BASE + 'api/integrations/Generic%20lab/seed',
+    { headers: { 'X-Eshu-CSRF': '1' } });
   await page.goto(BASE, { waitUntil: 'networkidle' });
-  await openAgents(page);
+  const aid = await openFirstAgent(page);
 
-  // 1. Tabs, normal New agent button, card summary in words.
-  ok(await page.locator('[data-x11-tab]').count() === 2, 'agents: expected exactly two tabs');
-  ok(await page.locator('#nav-allowances').count() === 0, 'agents: Allowances sidebar entry still present');
-  ok(await page.locator('.x11-title-row [data-new-agent]').count() === 1,
-     'agents: New agent is not a normal button beside the title');
-  ok(await page.locator('.x11-new-card').count() === 0, 'agents: New agent is still a card');
-  ok(await page.locator('[data-agent-card]').count() >= 2, 'agents: expected at least two cards');
-  const summaries = await page.locator('[data-agent-card] .x11-card-summary').allTextContents();
-  const summary = summaries[0] || '';
-  ok(/tools run without asking/.test(summary) && /ask first/.test(summary) &&
-     /on its own/.test(summary) && /SSH/.test(summary),
-     'agents: card summary is not in words: ' + summary);
-  ok(summaries.some((x) => /No tools yet/.test(x)), 'agents: an empty agent does not say No tools yet');
-  const banner = page.locator('.x11-paused-banner', { hasText: 'paused' });
-  ok(await banner.count() === 1 && /\d+ paused/.test(await banner.textContent()),
-     'agents: paused banner missing');
+  // 1. The section nav is horizontal tabs under the agent name.
+  ok(await page.locator('.x11-editor-tabs [data-x11-nav]').count() === 6,
+     'tabs: expected six horizontal section tabs');
+  ok(await page.locator('.x11-editor-tabs [data-x11-nav="overview"][aria-selected="true"]').count() === 1,
+     'tabs: Overview is not the selected tab');
+  ok(await page.locator('#x11-sec-overview').count() === 1, 'overview: section missing');
 
-  // 2. Deep link, one section at a time.
-  await page.locator('[data-agent-card]').first().click();
-  await page.waitForTimeout(900);
-  const aid = await page.evaluate(() => x11State.agent.id);
-  await page.goto(BASE + '#agent/' + aid + '/tools', { waitUntil: 'networkidle' });
-  await page.waitForTimeout(1300);
-  ok((await page.evaluate(() => location.hash)) === '#agent/' + aid + '/tools',
-     'deep link: hash was not preserved');
-  ok(await page.locator('.x11-section').count() === 1, 'editor: more than one section is visible');
-  ok(await page.locator('#x11-sec-tools').count() === 1, 'deep link: tools section did not open');
-  await page.locator('[data-x11-nav="overview"]').click();
-  await page.waitForTimeout(300);
-  ok(await page.locator('.x11-section').count() === 1, 'editor: more than one section after nav');
-  ok(await page.locator('#x11-sec-overview').count() === 1, 'editor: overview did not open');
-
-  // 3. Danger zone confirmation (dismiss; no revoke request).
-  const beforeRevoke = await page.evaluate(() => x11State.agent.revoked);
-  await page.locator('[data-danger-revoke]').click();
-  await page.waitForTimeout(300);
-  ok(dangerDismissed, 'danger zone: Revoke did not ask for confirmation');
-  ok(await page.evaluate(() => x11State.agent.revoked) === beforeRevoke,
-     'danger zone: a dismissed confirmation still changed the agent');
-
-  // 4. Paused reason and Resume.
-  const reason = (await page.locator('.x11-paused-reason').first().textContent()) || '';
-  ok(/the device changed in Home Assistant/.test(reason), 'paused: reason is not in plain words: ' + reason);
-  await page.locator('[data-resume-id]').first().click();
-  await page.waitForTimeout(1200);
-  ok(await page.locator('#x11-sec-overview .x11-paused-reason').count() === 0,
-     'paused: Resume did not clear the paused row');
-
-  // 5. Tools: collapsible groups, search, disabled always-ask, description.
+  // 2. Tools overview: summary, chips, tiles and the access bar.
   await page.locator('[data-x11-nav="tools"]').click();
-  await page.waitForTimeout(300);
-  ok(await page.locator('details[data-tool-group]').count() >= 1, 'tools: no integration groups');
-  await openGroup(page, 'Home Assistant');
-  const toolSummary = (await page.locator('details[data-tool-group="Home Assistant"] summary').textContent()) || '';
-  ok(/tools/.test(toolSummary) && /ask first/.test(toolSummary),
-     'tools: group summary is not in words: ' + toolSummary);
-  ok(await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="run"]').isDisabled(),
-     'tools: always-ask tool still offers Runs without asking');
-  ok(/Always asks you/.test(await page.locator('[data-always-line]').first().textContent()),
-     'tools: always-ask explanation missing');
-  ok(await page.locator('[data-tool-row="home_assistant_call_service"] [data-always-line] .link-btn').count() === 1,
-     'tools: call_service does not link to the device picker');
-  ok(await page.locator('[data-tool-row="home_assistant_ha_addon_action"] [data-always-line] .link-btn').count() === 0 &&
-     /Eshu requires your approval for this tool/.test(
-       await page.locator('[data-tool-row="home_assistant_ha_addon_action"] [data-always-line]').textContent()),
-     'tools: a non-device always-gate tool has the device link or the wrong text');
-  ok(!/REQUIRES OPERATOR APPROVAL/.test(await page.locator('[data-tool-row="home_assistant_call_service"]').textContent()),
-     'tools: an ALL-CAPS AI instruction is visible');
-  const desc = page.locator('[data-tool-row="home_assistant_call_service"] .x11-tool-desc');
-  ok(await desc.locator('.x11-more').count() === 1, 'tools: long description has no more control');
-  ok(await desc.locator('.x11-desc-rest').isHidden(), 'tools: the rest of the description starts open');
-  await desc.locator('.x11-more').click();
-  ok(!(await desc.locator('.x11-desc-rest').isHidden()), 'tools: more did not reveal the rest');
+  await page.waitForTimeout(600);
+  ok(await page.locator('#x11-sec-tools').count() === 1, 'tools: overview did not open');
+  const summary = (await page.locator('#x11-tools-summary').textContent()) || '';
+  ok(/can use \d+ tools in \d+ of \d+ integrations/.test(summary) &&
+     /\d+ ask you first; \d+ run on their own/.test(summary),
+     'tools: summary sentence is wrong: ' + summary);
+  const chips = await page.locator('[data-tile-filter]').allTextContents();
+  ok(chips.length === 3 && /In use \(\d+\)/.test(chips[0]) &&
+     /Not connected \(\d+\)/.test(chips[1]) && /All \(\d+\)/.test(chips[2]),
+     'tools: filter chips are wrong: ' + chips.join(' | '));
+  ok(await page.locator('[data-tile-filter="in_use"]').getAttribute('aria-pressed') === 'true',
+     'tools: In use is not the default chip');
+  const tileCount = await page.locator('[data-integration-tile]').count();
+  ok(tileCount >= 10, 'tools: expected the integration tiles, found ' + tileCount);
+  ok(/TfL/.test(await page.locator('[data-integration-tile="tfl"] .x11-tile-name').textContent()) &&
+     /Commute/.test(await page.locator('[data-integration-tile="commute"] .x11-tile-name').textContent()),
+     'tools: curated display names are missing');
+  const bars = page.locator('[data-integration-tile] .x11-accessbar[role="img"]');
+  ok(await bars.count() === tileCount, 'tools: a tile is missing its access bar');
+  const barLabel = (await bars.first().getAttribute('aria-label')) || '';
+  ok(/run on their own/.test(barLabel) && /ask you first/.test(barLabel) &&
+     /not allowed/.test(barLabel), 'tools: access bar aria is not in words: ' + barLabel);
+  ok(await page.locator('[data-integration-tile="Home Assistant"] .x11-tile-extra').count() === 1 &&
+     /run on their own/.test(await page.locator('[data-integration-tile="Home Assistant"] .x11-tile-extra').textContent()),
+     'tools: Home Assistant tile lacks its device line');
+  ok(await page.locator('[data-integration-tile="SSH"] .x11-tile-extra').count() === 1,
+     'tools: SSH tile is missing');
+  ok(await page.locator('[data-integration-tile="Websites"] .x11-tile-extra').count() === 1,
+     'tools: Websites tile is missing');
+  const fold = await page.locator('[data-show-unused]').textContent().catch(() => '');
+  ok(/Show \d+ integrations .* can.t use/.test(fold), 'tools: unused fold is missing: ' + fold);
 
-  // 6. Grid: grouped headers, protected line, label full name, styling.
-  ok(await page.locator('#x11-device-grid').count() === 1, 'grid: not present in Tools');
-  const help = (await page.locator('[data-perm-help]').textContent()) || '';
-  ok(/Only the devices you tick. No labels needed/.test(help), 'grid: Pick devices help missing');
-  ok(/The devices come from Home Assistant/.test(help) && /waits here for your one-click Accept/.test(help),
-     'grid: label help missing');
-  ok(await page.locator('.x11-subhead').count() === 1 &&
-     /Files/.test(await page.locator('.x11-subhead').textContent()),
-     'tools: Files subheading missing');
-  ok(await page.locator('[data-tool-row="ha_files_ha_config_list"]').count() === 1,
-     'tools: Files tool is not under Home Assistant');
-  const groupHeads = (await page.locator('table.x11-devices thead tr:first-child th').allTextContents()).join('|');
-  ok(/Lights: on \/ off/.test(groupHeads) && /Plugs and switches: on \/ off/.test(groupHeads) &&
-     /Covers: open \/ close/.test(groupHeads),
-     'grid: grouped headers missing: ' + groupHeads);
-  ok(await page.locator('[data-device-row="switch.plug"] .x11-protected-line:visible').count() === 1,
-     'grid: protected row is not one Protected line');
-  ok(/Protected/.test(await page.locator('[data-device-row="switch.plug"] .x11-protected-line:visible').textContent()) &&
-     /Rules for all agents/.test(await page.locator('[data-device-row="switch.plug"] .x11-protected-line:visible').textContent()),
-     'grid: protected line text missing');
-  ok(await page.locator('[data-device-row="switch.plug"] .x11-lock:not(.x11-protected-line):visible').count() === 0,
-     'grid: protected row still has repeated Locked cells');
-  const labelFull = (await page.locator('.x11-label-full').first().textContent()) || '';
-  ok(/Label: Living room lights/.test(labelFull), 'grid: full label name is not shown: ' + labelFull);
-  const searchBg = await page.locator('.x11-device-tools input[type="search"]').evaluate(
-    (e) => getComputedStyle(e).backgroundColor);
-  ok(!/255, 255, 255/.test(searchBg), 'grid: search box is still browser-white');
-  const nameFont = await page.locator('[data-device-row="switch.lamp"] .x11-device-name:visible').evaluate(
-    (e) => getComputedStyle(e).fontFamily);
-  const idFont = await page.locator('[data-device-row="switch.lamp"] .x11-device-id:visible').evaluate(
-    (e) => getComputedStyle(e).fontFamily);
-  ok(/Space Grotesk/.test(nameFont), 'grid: device name is not in the body font: ' + nameFont);
-  ok(/JetBrains Mono/.test(idFont), 'grid: entity id is not in mono: ' + idFont);
-  const checkAppearance = await page.locator('[data-device="switch.lamp"][data-action="switch.turn_off"]:visible').evaluate(
-    (e) => getComputedStyle(e).appearance);
-  ok(checkAppearance === 'none', 'grid: checkbox is still the browser default');
-  ok(await page.locator('[data-device-row="switch.lamp_child_lock"]').count() === 0,
-     'grid: settings entity is visible before Show settings entities');
-  await page.locator('.x11-device-tools label', { hasText: 'Show settings entities' }).click();
+  // 3. Search and the Not connected filter.
+  await page.locator('#x11-tile-search').fill('Sonarr');
   await page.waitForTimeout(300);
-  ok(await page.locator('[data-device-row="switch.lamp_child_lock"]').count() >= 1,
-     'grid: Show settings entities did not reveal the settings row');
-  await page.locator('.x11-device-tools label', { hasText: 'Show settings entities' }).click();
+  ok(await page.locator('[data-integration-tile]').count() === 1,
+     'tools: search did not narrow to Sonarr');
+  await page.locator('#x11-tile-search').fill('');
+  await page.waitForTimeout(300);
+  await page.locator('[data-tile-filter="not_connected"]').click();
+  await page.waitForTimeout(300);
+  ok(await page.locator('[data-integration-tile]').count() === 2,
+     'tools: Not connected should show the two empty integrations');
+  ok(await page.locator('[data-integration-tile].x11-tile-empty').count() === 2,
+     'tools: an unconnected tile is not dashed');
+  await page.locator('[data-tile-filter="in_use"]').click();
   await page.waitForTimeout(300);
 
-  // 7. Expiry remove sends expires_at: 0.
-  const light = page.locator('[data-perm-edit][data-domain="light"][data-service="turn_off"]');
-  ok(await light.locator('[data-expiry-clear]').count() === 1, 'expiry: remove control missing');
-  await light.locator('[data-expiry-clear]').click();
+  // 3b. SSH and Websites are ordinary integration pages too.
+  await page.locator('[data-integration-tile="SSH"]').click();
+  await page.waitForTimeout(600);
+  ok(await page.evaluate(() => location.hash) === '#agent/' + aid + '/tools/SSH' &&
+     await page.locator('.x11-section-title').textContent() === 'SSH' &&
+     await page.locator('[data-ssh-mode]').count() === 1,
+     'SSH: tile did not open its integration page');
+  await page.evaluate(() => x11ToolsBack());
+  await page.waitForTimeout(500);
+  await page.locator('[data-integration-tile="Websites"]').click();
+  await page.waitForTimeout(600);
+  ok(await page.evaluate(() => location.hash) === '#agent/' + aid + '/tools/Websites' &&
+     await page.locator('.x11-section-title').textContent() === 'Websites' &&
+     await page.locator('#x11-web-allow').count() === 1,
+     'Websites: tile did not open its integration page');
+  await page.evaluate(() => x11ToolsBack());
+  await page.waitForTimeout(500);
+
+  // 4. Tile -> integration page deep link, Reading/Changing, always-ask.
+  await page.locator('[data-integration-tile="Sonarr"]').click();
+  await page.waitForTimeout(800);
+  ok(await page.evaluate(() => location.hash) === '#agent/' + aid + '/tools/Sonarr',
+     'deep link: tile did not open the integration route');
+  ok(await page.locator('.x11-section-title').textContent() === 'Sonarr',
+     'integration: title is not the integration name');
+  ok(await page.locator('[data-tool-block="reading"]').count() === 1 &&
+     await page.locator('[data-tool-block="changing"]').count() === 1,
+     'integration: Reading/Changing groups missing');
+  ok(await page.locator('[data-tool-row="sonarr_series"]').count() === 1,
+     'integration: series tool missing');
+  ok(await page.locator('[data-limits] [data-rate-limit]').count() === 1,
+     'integration: the rate limit is missing');
+  ok(await page.locator('[data-arg-tool="sonarr_series"]').count() === 1,
+     'integration: a simple argument rule is not shown as a field');
+  const always = page.locator('[data-tool-row="sonarr_add_series"] [data-choice="run"]');
+  ok(await always.count() === 1 && await always.isDisabled(),
+     'integration: always-ask tool still offers Runs on its own');
+  ok(/Always asks you/.test(await page.locator('[data-tool-row="sonarr_add_series"] .x11-always-line').textContent()),
+     'integration: always-ask reason missing');
+  ok(await page.locator('.x11-int-head [data-remove-access]').count() === 0,
+     'integration: Remove all access is still in the header');
+  const removeBox = await box(page.locator('[data-remove-access]'));
+  const limitsBox = await box(page.locator('[data-limits]'));
+  ok(removeBox && limitsBox && removeBox.y > limitsBox.y,
+     'integration: Remove all access is not below Limits');
+  ok(await page.locator('#x11-json-tools').count() === 0, 'integration: tools JSON leaked from the overview');
+  await page.locator('[data-int-json]').click();
   await page.waitForTimeout(300);
+  const intJson = (await page.locator('#x11-json-int').textContent()) || '';
+  ok(/"tools"/.test(intJson) && /"mode"/.test(intJson) && /"approval"/.test(intJson) &&
+     !/"home_assistant"/.test(intJson), 'integration: JSON slice is wrong');
+  await page.locator('[data-int-json]').click();
+  await page.waitForTimeout(200);
+
+  // 5. A read tool can be made to ask, and Check carries an empty hash.
+  await page.locator('[data-tool-row="sonarr_series"] [data-choice="ask"]').click();
+  await page.waitForTimeout(300);
+  ok(await page.locator('#x11-savebar').isVisible(), 'integration: save bar did not appear');
   await page.locator('#x11-save-changes').click();
-  await page.waitForTimeout(700);
-  const expiryDoc = bodies.filter((b) => b.preview === true).slice(-1)[0] || {};
-  const lightPerm = (((expiryDoc.document || {}).home_assistant || {}).permissions || [])
-    .filter((p) => p.domain === 'light' && p.service === 'turn_off')[0] || {};
-  ok(lightPerm.expires_at === 0, 'expiry: remove did not send expires_at 0');
-  await page.locator('#x11-preview-modal button', { hasText: 'Cancel' }).click();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(800);
+  ok(await page.locator('#x11-preview-modal').isVisible(), 'integration: Check did not preview');
+  const checkBody = bodies.filter((b) => b.preview === true).pop() || {};
+  ok(checkBody.preview_hash === '', 'integration: a preview request carried a hash');
+  await cancelPreview(page);
   await page.evaluate(() => x11Discard());
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(300);
 
-  // 8. A new risky device: one section, one risky group, disabled Apply.
-  await page.locator('[data-device="cover.garage"][data-action="cover.open_cover"]:visible').check();
+  // 6. Remove all access goes through Check -> preview, not a direct write.
+  await page.locator('[data-remove-access]').click();
+  await page.waitForTimeout(1300);
+  ok(await page.locator('#x11-preview-modal').isVisible(),
+     'remove access: did not open the Check preview');
+  await cancelPreview(page);
+  await page.evaluate(() => x11Discard());
+  await page.waitForTimeout(300);
+
+  // 6b. A generic write under the default destructive gate depends on the
+  // call; it is neither counted as a run nor as an ask.
+  await gotoHash(page, '#agent/' + aid + '/tools/Generic%20lab');
+  await page.waitForTimeout(700);
+  ok(await page.locator('[data-tool-row="generic_lab_write"][data-tool-outcome="depends"]').count() === 1 &&
+     /Depends on the call/.test(await page.locator('[data-tool-row="generic_lab_write"] .x11-depends-line').textContent()),
+     'integration: a destructive-gate write does not say Depends on the call');
+
+  // 7. Back to Tools, then the Home Assistant page with four tabs.
+  await gotoHash(page, '#agent/' + aid + '/tools');
+  ok(await page.locator('[data-x11-section="tools"]').count() === 1,
+     'tools: back route did not land on the overview');
+  await page.locator('[data-integration-tile="Home Assistant"]').click();
+  await page.waitForTimeout(800);
+  ok(await page.locator('[data-int-tab]').count() === 4,
+     'HA: expected four tabs');
+  ok(await page.locator('[data-int-tab="tools"][aria-selected="true"]').count() === 1,
+     'HA: Tools is not the default tab');
+  ok(await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="run"]').isDisabled(),
+     'HA tools: call_service still offers Runs on its own');
+  ok(/Devices/.test(await page.locator('[data-tool-row="home_assistant_call_service"] .x11-always-line').textContent()),
+     'HA tools: call_service does not point at Devices');
+
+  // 8. Devices: rail, hidden line, protected pill, readings.
+  await page.locator('[data-int-tab="devices"]').click();
+  await page.waitForTimeout(700);
+  ok(await page.locator('[data-device-rail] [data-device-filter]').count() >= 10,
+     'devices: filter rail is missing');
+  ok(await page.locator('[data-device-filter="switch"][aria-pressed="true"]').count() >= 1,
+     'devices: the default filter is not Plugs and switches');
+  ok(await page.locator('[data-device-filter="lock"]').count() >= 1,
+     'devices: the Locks filter is missing');
+  await page.locator('[data-device-filter="lock"]').first().click();
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device-row="lock.front_door"]').count() === 1,
+     'devices: a lock is not visible under its filter');
+  await page.locator('[data-device-filter="switch"]').first().click();
+  await page.waitForTimeout(400);
+  ok(/settings, diagnostic and helper entities are hidden/.test(
+       await page.locator('[data-hidden-line]').textContent()),
+     'devices: hidden line is missing');
+  ok(await page.locator('[data-device-row="switch.plug"] .x11-pill-protected').count() === 1,
+     'devices: protected row should have exactly one Protected pill');
+  ok(/Rules for all agents/.test(
+       await page.locator('[data-device-row="switch.plug"] .x11-pill-link').textContent()),
+     'devices: protected pill does not link to Rules');
+  const readings = await page.locator('[data-room="Living room"] .x11-room-readings').textContent().catch(() => '');
+  ok(/\d/.test(readings), 'devices: the room header has no key readings: ' + readings);
+  const allSwitchRows = await page.locator('[data-device-row]').count();
+  await page.locator('.x11-device-tools input[type="checkbox"]').check();
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device-row]').count() < allSwitchRows,
+     'devices: Only devices the agent can use did not narrow the list');
+  await page.locator('.x11-device-tools input[type="checkbox"]').uncheck();
+  await page.waitForTimeout(400);
+  await page.locator('#x11-device-search').fill('kettle');
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device-row]').count() === 1 &&
+     await page.locator('[data-device-row="switch.kettle"]').count() === 1,
+     'devices: search did not narrow to the kettle');
+  await page.locator('#x11-device-search').fill('');
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device-row="switch.lamp_child_lock"]').count() === 0,
+     'devices: a hidden child-lock row is visible before Show them');
+  await page.locator('[data-show-hidden]').click();
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-hidden-group]').count() === 1 &&
+     await page.locator('[data-hidden-group] [data-device-row="switch.lamp_child_lock"]').count() === 1,
+     'devices: Show them did not reveal the hidden rows');
+  await page.locator('[data-show-hidden]').click();
+  await page.waitForTimeout(300);
+
+  // 9. A pill cycles ask -> run, and Check previews it.
+  const coffee = page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]');
+  ok(await coffee.getAttribute('data-state') === 'ask', 'devices: expected the coffee pill to ask');
+  await coffee.click();
+  await page.waitForTimeout(400);
+  ok(await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').getAttribute('data-state') === 'run',
+     'devices: pill did not cycle ask -> run');
+  await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').click();
+  await page.waitForTimeout(300);
+  ok(await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').getAttribute('data-state') === 'ask',
+     'devices: pill did not cycle run -> ask');
+  await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').click();
   await page.waitForTimeout(300);
   await page.locator('#x11-save-changes').click();
-  await page.waitForTimeout(700);
-  const preview = (await page.locator('#x11-preview-body').textContent()) || '';
-  ok(/open 1 more device: Garage door/.test(preview), 'preview: plain sentence is wrong: ' + preview);
-  ok(!/tools: all tools/.test(preview), 'preview: a device-only change lists tools');
-  ok(/New or changed/.test(preview), 'preview: new risky group missing');
-  ok(!/Already allowed, confirm again/.test(preview), 'preview: old risky group shown for a new item');
-  ok(/Open · Garage door/.test(preview), 'preview: risky line does not name action and device: ' + preview);
-  ok(await page.locator('#x11-preview-apply').isDisabled(), 'preview: Apply enabled before the risk box');
-  ok(/Allow and save/.test(await page.locator('#x11-preview-apply').textContent()),
-     'preview: risk apply is not called Allow and save');
+  await page.waitForTimeout(800);
+  const cyclePreview = (await page.locator('#x11-preview-body').textContent()) || '';
+  ok(/Coffee machine/.test(cyclePreview) && /turn on 1 more device/.test(cyclePreview),
+     'devices: Check preview does not name the new permission: ' + cyclePreview);
+  await cancelPreview(page);
+  await page.evaluate(() => x11Discard());
+  await page.waitForTimeout(300);
+
+  // 10. A risky device needs the second confirmation in the preview.
+  await page.locator('[data-device-filter="cover"]').first().click();
+  await page.waitForTimeout(400);
+  const garage = page.locator('[data-device="cover.garage"][data-device-action="cover.open_cover"]');
+  ok(await garage.count() === 1, 'devices: garage cover is missing');
+  await garage.click();
+  await page.waitForTimeout(300);
+  await page.locator('#x11-save-changes').click();
+  await page.waitForTimeout(800);
+  const riskPreview = (await page.locator('#x11-preview-body').textContent()) || '';
+  ok(/Garage door/.test(riskPreview) && /risky/i.test(riskPreview),
+     'devices: risky preview is wrong: ' + riskPreview);
+  ok(await page.locator('#x11-preview-apply').isDisabled(),
+     'devices: risky Apply is enabled before the confirmation');
   await page.locator('[data-x11-ack="risk"]').check();
   await page.waitForTimeout(200);
-  ok(await page.locator('#x11-preview-apply').isEnabled(), 'preview: Apply stayed disabled after ticking');
-  await page.locator('#x11-preview-apply').click();
-  await page.waitForTimeout(1000);
-  const riskyApply = bodies.filter((b) => b.preview === false).pop() || {};
-  ok(riskyApply.risk_ack === true, 'risk: risk_ack was not sent');
-  ok(!!riskyApply.preview_hash, 'risk: preview_hash was not sent');
-  const lastPreview = bodies.filter((b) => b.preview === true).pop() || {};
-  ok(lastPreview.preview_hash === '', 'preview: a preview request carried a hash');
-
-  // 9. Both risky groups in one preview.
-  await page.locator('[data-device="cover.garage"][data-action="cover.close_cover"]:visible').check();
-  await page.waitForTimeout(300);
-  await page.locator('#x11-save-changes').click();
-  await page.waitForTimeout(700);
-  const both = (await page.locator('#x11-preview-body').textContent()) || '';
-  ok(/New or changed/.test(both) && /Already allowed, confirm again/.test(both),
-     'preview: the two risky groups are not both present: ' + both);
-  await page.locator('#x11-preview-modal button', { hasText: 'Cancel' }).click();
-  await page.waitForTimeout(300);
+  ok(await page.locator('#x11-preview-apply').isEnabled(),
+     'devices: risky Apply stayed disabled after the confirmation');
+  await cancelPreview(page);
   await page.evaluate(() => x11Discard());
-
-  // 10. Save bar never covers the last row.
-  await page.locator('[data-device="switch.kettle"][data-action="switch.turn_off"]:visible').uncheck();
   await page.waitForTimeout(300);
-  await scrollMain(page, true);
-  const bar = await box(page.locator('#x11-savebar'));
-  const lastRow = await box(page.locator('[data-perm-edit]').last());
-  ok(bar && lastRow && lastRow.y + lastRow.height <= bar.y + 1,
-     'savebar: covers the last row');
-  await page.evaluate(() => x11Discard());
 
-  // 11. JSON Apply stays disabled until Check succeeds, and after an edit.
+  // 11. Sensors: a reading and Can read, no pills.
+  await page.locator('[data-device-filter="temperature"]').first().click();
+  await page.waitForTimeout(400);
+  const sensor = page.locator('[data-device-row="sensor.living_temp"]');
+  ok(await sensor.count() === 1, 'sensors: living temperature is missing');
+  ok(/\d/.test(await sensor.locator('.x11-sensor-reading b').textContent()),
+     'sensors: no reading');
+  ok(/Can read/.test(await sensor.locator('.x11-sensor-reading').textContent()),
+     'sensors: Can read is missing');
+  ok(await sensor.locator('[data-device-pill]').count() === 0,
+     'sensors: a sensor has action pills');
+
+  // 12. HA JSON on the tabs is the home_assistant section.
+  await page.locator('[data-int-json]').click();
+  await page.waitForTimeout(300);
+  const haJson = (await page.locator('#x11-json-home_assistant').textContent()) || '';
+  ok(/"permissions"/.test(haJson) && !/"tools"/.test(haJson),
+     'HA: JSON tab is not the home_assistant section');
+  await page.locator('[data-int-json]').click();
+  await page.waitForTimeout(200);
+
+  // 12b. With call service not allowed, Devices shows one line, not pills.
+  await page.locator('[data-int-tab="tools"]').click();
+  await page.waitForTimeout(500);
+  await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="none"]').click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-int-tab="devices"]').click();
+  await page.waitForTimeout(500);
+  const noCall = page.locator('[data-no-call-service]');
+  ok(await noCall.count() === 1 &&
+     /can.t control Home Assistant devices/.test(await noCall.textContent()) &&
+     /Allow call service on the Tools tab/.test(await noCall.textContent()),
+     'devices: no-call-service line is missing');
+  await noCall.locator('a').click();
+  await page.waitForTimeout(500);
+  ok(await page.locator('[data-int-tab="tools"][aria-selected="true"]').count() === 1,
+     'devices: the call-service link did not open Tools');
+  await page.evaluate(() => x11Discard());
+  await page.waitForTimeout(300);
+  await page.locator('[data-int-tab="tools"]').click();
+  await page.waitForTimeout(300);
+
+  // 13. Runs on its own: cards, limits, paused Resume, waiting Accept/Dismiss.
+  await page.locator('[data-int-tab="runs"]').click();
+  await page.waitForTimeout(600);
+  ok(await page.locator('[data-permission-card]').count() >= 4,
+     'runs: permission cards are missing');
+  ok(/At most \d+ an hour/.test(await page.locator('[data-permission-card]').first().textContent()),
+     'runs: limits are not in words');
+  ok(/Turn (off|on) (plugs and switches|lights|covers)/.test(
+       await page.locator('[data-permission-card]').first().textContent()),
+     'runs: a permission card does not name the device type');
+  ok(/Follows the label/.test(await page.locator('[data-permission-card]').nth(1).textContent()),
+     'runs: label source is not in words');
+  ok(await page.locator('[data-permission-card].x11-perm-paused [data-resume-id]').count() === 1,
+     'runs: paused Resume is missing');
+  await page.locator('[data-edit-permission]').first().click();
+  await page.waitForTimeout(300);
+  ok(await page.locator('.x11-perm-edit [data-rate]').count() === 1 &&
+     await page.locator('.x11-perm-edit [data-expiry-set]').count() === 1,
+     'runs: Edit does not open the rate/window/end-date editor');
+  await page.locator('[data-edit-permission]').first().click();
+  const waiting = page.locator('[data-waiting-grid] [data-waiting-row]');
+  ok(await waiting.count() >= 1, 'runs: expected a waiting device');
+  await page.locator('[data-waiting-grid] [data-dismiss-join]').first().click();
+  await page.waitForSelector('[data-waiting-grid] [data-dismissed-line]', { timeout: 6000 }).catch(() => {});
+  ok(await page.locator('[data-waiting-grid] [data-dismissed-line]').count() === 1,
+     'runs: Dismiss did not leave a dismissed line');
+  await page.locator('[data-waiting-grid] [data-reoffer-join]').first().click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-waiting-grid] [data-dismissed-line]').length === 0,
+    null, { timeout: 6000 }).catch(() => {});
+  ok(await page.locator('[data-waiting-grid] [data-dismissed-line]').count() === 0 &&
+     await page.locator('[data-waiting-grid] [data-accept-join]').count() === 2,
+     'runs: Re-offer did not return the device');
+  await page.locator('[data-waiting-grid] [data-accept-join]').first().click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-waiting-grid] [data-waiting-row]').length === 1,
+    null, { timeout: 6000 }).catch(() => {});
+  ok(await page.locator('[data-waiting-grid] [data-waiting-row]').count() === 1,
+     'runs: Accept did not remove the waiting device');
+
+  // 14. Files: the pinned fingerprint and the write-always-asks note.
+  await page.locator('[data-int-tab="files"]').click();
+  await page.waitForTimeout(600);
+  ok(await page.locator('[data-tool-row="ha_files_ha_config_write"]').count() === 1 ||
+     await page.locator('[data-tool-row$="ha_config_write"]').count() === 1,
+     'files: write tool is missing');
+  ok(await page.locator('[data-tool-row$="ha_config_write"] [data-choice="run"]').isDisabled(),
+     'files: a write still offers Runs on its own');
+  const filesText = (await page.locator('[data-files-footer]').textContent()) || '';
+  ok(/Pinned host key/.test(filesText) && /ssh-keygen -lf/.test(filesText),
+     'files: fingerprint or compare line is missing: ' + filesText);
+
+  // 15. Overview: the ledger comes first, then the permissions, no HA-first block.
+  await gotoHash(page, '#agent/' + aid + '/overview');
+  ok(await page.locator('[data-overview-ledger]').count() === 1,
+     'overview: ledger is missing');
+  ok(await page.locator('[data-overview-ledger] [data-ledger]').count() >= 10,
+     'overview: ledger has no integration rows');
+  ok(await page.locator('[data-paused-block]').count() === 1,
+     'overview: paused block is missing');
+  const ledgerBox = await box(page.locator('[data-overview-ledger]'));
+  const permsBox = await box(page.locator('.x11-perm-cards').first());
+  ok(ledgerBox && permsBox && ledgerBox.y < permsBox.y,
+     'overview: permissions appear above the integration ledger');
+  ok(await page.locator('[data-danger-zone]').count() === 1,
+     'overview: danger zone is missing');
+
+  // 16. Tools JSON is the whole tools section; JSON Apply is Check-gated.
+  await page.locator('[data-x11-nav="tools"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('[data-json-toggle="tools"]').click();
+  await page.waitForTimeout(300);
+  const toolsJson = (await page.locator('#x11-json-tools').textContent()) || '';
+  ok(/"mode"/.test(toolsJson) && /"approval"/.test(toolsJson) && /"argument_rules"/.test(toolsJson),
+     'tools: Show JSON is not the whole tools section');
   await page.locator('[data-x11-nav="json"]').click();
   await page.waitForTimeout(300);
   ok(await page.locator('#x11-json-apply').isDisabled(), 'JSON: Apply enabled before Check');
   await page.locator('#x11-json-check').click();
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(800);
   ok(await page.locator('#x11-preview-modal').isVisible(), 'JSON: Check did not preview');
-  await page.locator('#x11-preview-modal button', { hasText: 'Cancel' }).click();
-  await page.waitForTimeout(300);
+  await cancelPreview(page);
   ok(!(await page.locator('#x11-json-apply').isDisabled()), 'JSON: Apply stayed disabled after Check');
   await page.locator('#x11-json-doc').fill('{"schema_version":1}');
   await page.waitForTimeout(200);
   ok(await page.locator('#x11-json-apply').isDisabled(), 'JSON: Apply stayed enabled after an edit');
 
-  // 12. A stale version is a 409 and reloads with the reason.
-  await page.locator('[data-x11-nav="tools"]').click();
-  await page.waitForTimeout(300);
-  await openGroup(page, 'Home Assistant');
-  await page.locator('[data-tool-row="home_assistant_get_config"] [data-choice="ask"]').click();
-  await page.waitForTimeout(300);
-  await page.locator('#x11-save-changes').click();
-  await page.waitForTimeout(700);
-  const bump = await page.context().request.put(BASE + 'api/agents/' + aid + '/policy', {
-    data: { rate_limit_per_min: 31 }, headers: { 'Content-Type': 'application/json', 'X-Eshu-CSRF': '1' } });
-  ok(bump.ok(), '409: could not bump the config version');
-  if (await page.locator('[data-x11-ack="risk"]').count()) await page.locator('[data-x11-ack="risk"]').check();
-  if (await page.locator('[data-x11-ack="resume"]').count()) await page.locator('[data-x11-ack="resume"]').check();
-  await page.waitForTimeout(200);
-  await page.locator('#x11-preview-apply').click();
-  await page.waitForTimeout(1200);
-  const notice = (await page.locator('#x11-notice').textContent()) || '';
-  ok(/changed since you opened it/.test(notice), '409: reload message is not the required one: ' + notice);
-
-  // 12b. Rules: short protected list, Change opens the picker, settings hidden.
-  await page.evaluate(() => x11Back());
-  await page.waitForTimeout(700);
-  await page.locator('[data-x11-tab="rules"]').click();
-  await page.waitForTimeout(700);
-  await page.locator('[data-rules="protected"] summary').click();
-  await page.waitForTimeout(300);
-  ok(/Protected: TV plug/.test(await page.locator('[data-protected-summary]').textContent()),
-     'rules: protected devices are not a short list');
-  ok(/Limits decide which kinds of action can ever be allowed/.test(
-       await page.locator('[data-permissions-help]').textContent()),
-     'rules: How permissions work panel missing');
-  await page.locator('[data-protect-change]').click();
-  await page.waitForTimeout(300);
-  ok(await page.locator('[data-protect-settings]').count() === 1, 'rules: settings toggle missing');
-  ok(await page.locator('[data-protect="switch.lamp_child_lock"]').count() === 0,
-     'rules: settings entity is visible before Show settings entities');
-  await page.locator('[data-protect-settings]').check();
-  await page.waitForTimeout(300);
-  ok(await page.locator('[data-protect="switch.lamp_child_lock"]').count() === 1,
-     'rules: Show settings entities did not reveal the settings row');
-  await page.locator('[data-rules="protected"] button', { hasText: 'Cancel' }).click();
-
-  // 12c. Label joiners: banner, Overview, grid, Accept and Dismiss.
-  await page.evaluate(() => x11Back());
-  await page.waitForTimeout(800);
-  ok(/2 waiting/.test(await page.locator('[data-waiting-banner]').textContent()),
-     'waiting: Agents banner does not show 2 waiting');
-  await page.locator('[data-waiting-review]').click();
+  // 16b. Emergency Freeze is visible on the summary and on a write row.
+  const frozen = await page.evaluate(async () => {
+    const r = await fetch('/api/freeze', { method: 'POST',
+      headers: { 'X-Eshu-CSRF': '1' } });
+    return r.status;
+  });
+  ok(frozen === 200, 'freeze: could not turn the freeze on');
+  await gotoHash(page, '#agent/' + aid + '/tools');
+  await page.reload({ waitUntil: 'networkidle' });
   await page.waitForTimeout(1000);
-  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 2,
-     'waiting: Overview does not list both joiners');
-  await page.locator('[data-x11-nav="tools"]').click();
-  await page.waitForTimeout(500);
-  ok(await page.locator('[data-waiting-grid] [data-waiting-row]').count() === 2,
-     'waiting: device grid does not list the joiners');
-  await page.locator('[data-x11-nav="overview"]').click();
-  await page.waitForTimeout(500);
-  await page.locator('#x11-sec-overview [data-accept-join]').first().click();
-  await page.waitForTimeout(1400);
-  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 1,
-     'waiting: Accept did not remove the first joiner');
-  await page.locator('#x11-sec-overview [data-dismiss-join]').first().click();
-  await page.waitForTimeout(1400);
-  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 1,
-     'waiting: Dismiss removed the row instead of keeping it visible');
-  const dismissed = page.locator('#x11-sec-overview [data-dismissed-line]');
-  ok(await dismissed.count() === 1 && /dismissed \(1\)/.test(await dismissed.textContent()),
-     'waiting: dismissed count is missing');
-  await page.locator('#x11-sec-overview [data-reoffer-join]').click();
-  await page.waitForTimeout(1400);
-  ok(await page.locator('#x11-sec-overview [data-dismissed-line]').count() === 0 &&
-     await page.locator('#x11-sec-overview [data-accept-join]').count() === 1,
-     'waiting: Re-offer did not return the joiner to the waiting list');
-  await page.locator('#x11-sec-overview [data-dismiss-join]').click();
-  await page.waitForTimeout(1400);
-  await page.locator('#x11-sec-overview [data-accept-all-join]').click();
-  await page.waitForTimeout(1400);
-  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 0,
-     'waiting: Accept all did not include the dismissed joiner');
-
-  // 12d. Integrations: the Files sub-card and the SSH key form.
-  await page.evaluate(() => switchView('integrations'));
-  await page.waitForTimeout(1000);
-  ok(await page.locator('.i-subcard').count() === 1 &&
-     /Files \(SSH add-on\)/.test(await page.locator('.i-subcard').textContent()),
-     'integrations: Files is not a sub-card of Home Assistant');
-  ok(await page.locator('[data-ha-link-disabled]').count() === 1 &&
-     /linked HA disabled/.test(await page.locator('[data-ha-link-disabled]').textContent()),
-     'integrations: a disabled HA link is not shown as broken');
-  await page.selectOption('#int-kind', 'ha_ssh');
-  await page.waitForTimeout(200);
-  ok(await page.locator('#int-ssh-fields').isVisible(), 'integrations: SSH key fields are hidden');
-  ok(await page.locator('#int-secret').isHidden(), 'integrations: the single-line secret is still shown');
-  await page.locator('#int-name').fill('bad-files');
-  await page.locator('#int-base-url').fill('192.0.2.60');
-  await page.locator('#int-ssh-key').fill('not a private key');
-  await page.locator('#int-submit-btn').click();
-  await page.waitForTimeout(300);
-  ok(/OpenSSH private key/.test(await page.locator('#toast').textContent()),
-     'integrations: a bad key is not refused in the form');
+  ok(/Emergency Freeze/.test(await page.locator('#x11-tools-summary').textContent()),
+     'freeze: the summary does not say the freeze is on');
+  ok(/Frozen/.test(await page.locator('.x11-legend').textContent()),
+     'freeze: the legend has no Frozen state');
+  await gotoHash(page, '#agent/' + aid + '/tools/Generic%20lab');
+  await page.waitForTimeout(600);
+  const frozenWrite = page.locator('[data-tool-row="generic_lab_write"]');
+  ok(await frozenWrite.getAttribute('data-tool-outcome') === 'depends' &&
+     await frozenWrite.getAttribute('data-tool-frozen') === '1' &&
+     /Frozen/.test(await frozenWrite.locator('.x11-frozen-line').textContent()),
+     'freeze: a write row does not keep Depends and show Frozen');
+  await page.evaluate(async () => {
+    await fetch('/api/unfreeze', { method: 'POST',
+      headers: { 'X-Eshu-CSRF': '1' } });
+  });
 
   ok(errors.length === 0, 'browser errors: ' + errors.slice(0, 4).join(' | '));
 
-  // 13. Phone width: cards, per-type settings, no overlap, no horizontal scroll.
+  // 17. Phone: one-column tiles, chips, 44 px buttons, no overlap or side scroll.
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const phoneErrors = [];
+  phone.on('pageerror', (e) => phoneErrors.push(e.message));
   await login(phone.context());
-  await phone.goto(BASE + '#agent/' + aid + '/tools', { waitUntil: 'networkidle' });
-  await phone.waitForTimeout(1400);
-  ok(await phone.locator('.x11-section').count() === 1, '390: more than one section is visible');
-  ok(await phone.locator('.x11-mobile-grid').isVisible(), '390: device cards are not shown');
-  ok(await phone.locator('.x11-mobile-type-settings').first().isVisible(),
-     '390: per-type settings are missing');
-  ok(await phone.locator('.x11-mobile-device [data-action]').count() > 0,
-     '390: device cards have no toggles');
-  ok(await phone.locator('.x11-mobile-area').count() > 0,
-     '390: device cards are not grouped by room');
+  await gotoHash(phone, '#agent/' + aid + '/tools');
+  const t1 = await box(phone.locator('[data-integration-tile]').nth(0));
+  const t2 = await box(phone.locator('[data-integration-tile]').nth(1));
+  ok(t1 && t2 && Math.abs(t1.x - t2.x) < 2 && t2.y > t1.y,
+     '390: integration cards are not one column');
+  const tabScroll = await phone.locator('.x11-editor-tabs').evaluate((e) => [e.scrollWidth, e.clientWidth]);
+  ok(tabScroll[0] > tabScroll[1], '390: section tabs do not scroll horizontally');
+  const toolWidths = await phone.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
+  ok(toolWidths[0] <= toolWidths[1] + 1, '390: horizontal scroll on Tools');
+  await gotoHash(phone, '#agent/' + aid + '/tools/Home%20Assistant/devices');
+  ok(await phone.locator('[data-device-rail]').isHidden(), '390: the desktop rail is visible');
+  ok(await phone.locator('[data-device-chips]').isVisible(), '390: device chips are missing');
+  ok(await phone.locator('[data-device-chips] [data-device-filter="sensor"]').count() === 1,
+     '390: the Sensors chip is missing');
+  const chipBox = await box(phone.locator('[data-device-chips] [data-device-filter="sensor"]'));
+  ok(chipBox && chipBox.height >= 44, '390: a filter chip is below 44 px');
+  const big = phone.locator('[data-device-pill]').first();
+  const bigBox = await box(big);
+  ok(bigBox && bigBox.height >= 44, '390: a device pill is below 44 px');
+  const row = phone.locator('[data-device-row]').first();
+  const stateBox = await box(row.locator('.x11-device-readout'));
+  const pillsBox = await box(row.locator('.x11-device-pills'));
+  ok(stateBox && pillsBox && !overlap(stateBox, pillsBox) && stateBox.x > pillsBox.x,
+     '390: device state is not on the right of the buttons');
   await phone.evaluate(() => {
     const m = document.querySelector('.main-body');
-    const g = document.getElementById('x11-device-grid');
-    if (m && g) m.scrollTop += g.getBoundingClientRect().top - 78;
+    if (m) m.scrollTop = 260;
   });
   await phone.waitForTimeout(300);
   const headerBg = await phone.evaluate(() => {
@@ -392,34 +551,14 @@ async function openGroup(page, name) {
   ok(headerBg.display === 'block' && headerBg.bg !== 'rgba(0, 0, 0, 0)' &&
      /x11-mobile-header-bg/.test(headerBg.hit || ''),
      '390: the fixed header is not opaque over scrolled content ' + JSON.stringify(headerBg));
-  const barBox = await box(phone.locator('#x11-mobile-header-bg'));
-  const scrolledSearch = await box(phone.locator('.x11-device-tools input[type="search"]'));
-  const scrolledFilters = await box(phone.locator('.x11-device-tools label').first());
-  ok(barBox && scrolledSearch && scrolledFilters &&
-     scrolledSearch.y >= barBox.y + barBox.height - 1 &&
-     scrolledFilters.y >= barBox.y + barBox.height - 1,
-     '390: scrolled search or filters sit under the fixed header');
-  let m = await phone.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
-  ok(m[0] <= m[1] + 1, '390: horizontal scroll (' + m[0] + ' > ' + m[1] + ')');
-  await scrollMain(phone, false);
-  const search = await box(phone.locator('.x11-device-tools input[type="search"]'));
-  const filters = await box(phone.locator('.x11-device-tools label').first());
-  ok(search && filters && search.y + search.height <= filters.y + 1,
-     '390: search and filters are not stacked');
+  const widths = await phone.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
+  ok(widths[0] <= widths[1] + 1, '390: horizontal scroll (' + widths[0] + ' > ' + widths[1] + ')');
   const menu = await box(phone.locator('#mobile-menu-btn'));
   const freeze = await box(phone.locator('#mobile-freeze'));
-  ok(!overlap(menu, search) && !overlap(menu, filters) &&
-     !overlap(freeze, search) && !overlap(freeze, filters),
-     '390: header button overlaps search or filters ' +
-     JSON.stringify({ menu, freeze, search, filters }));
-  await phone.locator('[data-device="switch.kettle"][data-action="switch.turn_off"]:visible').uncheck();
-  await phone.waitForTimeout(300);
-  await phone.locator('[data-perm-edit]').last().scrollIntoViewIfNeeded();
-  await phone.waitForTimeout(200);
-  const pbar = await box(phone.locator('#x11-savebar'));
-  const plast = await box(phone.locator('[data-perm-edit]').last());
-  ok(pbar && plast && plast.y + plast.height <= pbar.y + 1,
-     '390: save bar covers the last permission row ' + JSON.stringify({ pbar, plast }));
+  const firstCard = await box(phone.locator('[data-device-row]').first());
+  ok(!overlap(menu, firstCard) && !overlap(freeze, firstCard),
+     '390: the header buttons overlap the device card');
+  ok(phoneErrors.length === 0, '390 browser errors: ' + phoneErrors.slice(0, 4).join(' | '));
 
   await browser.close();
   if (failures.length) {
