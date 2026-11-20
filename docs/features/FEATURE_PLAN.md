@@ -23123,3 +23123,70 @@ Nits, none blocking:
    `mcp` as agent names at creation. Otherwise an agent with one of
    those names reads as the operator Test in the call log, and
    `_caller_agent` would resolve rows to it.
+
+### Security: X11 Stage 4 server part (44f599d)
+
+Read as code text only; nothing was run. The UI commit was not reviewed.
+
+**Approved once CB15 is fixed. CB15 must land before the Tools overview
+ships.**
+
+**What holds.**
+
+* `GET /api/agents/{id}/tools-summary` requires the operator session. It
+  returns names, counts and wording only, with no secrets and no writes.
+* `available-tools` adds the curated label and the tool's `params`.
+  Those are schema entries (name, type, description, default) and stay
+  behind the same operator session.
+* The device classification is a pure function of registry and state
+  fields that S1 already read.
+* The seed labels are display strings, with no schema change.
+* No write path, preview hash or acknowledgement rule changed.
+* The new screenshots use synthetic data.
+
+**CB15 (must). `tool_outcome` is a second copy of the gate rule, and it
+disagrees with the real one.** The operator reads this summary as what
+the agent can do. Where it is wrong, it mostly understates access, which
+is the unsafe direction.
+
+* **Allowlist.** The real check, `tool_allowed`, matches `fnmatch`
+  patterns such as `home_assistant_*` and `*`. The summary tests exact
+  membership, so a tool a pattern allows shows "Not allowed".
+* **Approval.** The real check, `approval_mode`, falls back from the exact
+  key to `ns_*`, `ns.*` and `*`, and treats an unknown value as gated. The
+  summary reads the exact key only, so a `*: ungated` agent shows "Asks
+  you first" for tools that run on their own.
+* **Default gate.** `_run_tool` gates on the integration's `gate_mode`
+  (`all`, or `destructive` with `is_destructive(method, path)`) and on
+  `always_gate` and admin config writes, not on `read_only`.
+  * A non-read-only tool on a `destructive` integration with a
+    non-destructive method runs ungated, but shows "Asks you first".
+  * Under `gate_mode: all` a read asks, but shows "Runs on its own".
+* **Missing from the summary:** `principal_allow`, explicit hassio
+  approval, the freeze, and outcomes that depend on the arguments (an
+  F27 allowance, a destructive path).
+
+Fix:
+
+* Take the static part of the gate decision out of `_run_tool` into one
+  pure function. `_run_tool` and this summary both call it, using
+  `tool_allowed`, `approval_mode`, `gate_mode`, `always_gate` and
+  `principal_allow`.
+* Where the outcome depends on the arguments, return "depends" and
+  word the tile accordingly, for example "asks unless a device
+  permission covers it". Never guess "ask".
+* Add a test that sets wildcard allow and approval rows and asserts the
+  summary matches what `_run_tool` would do.
+
+Nits:
+
+1. **`useful` hides locks.** `CATEGORY_BY_DOMAIN` has no `lock`,
+   `valve`, `button`, `scene`, `script` or `vacuum`, so those are never
+   `useful`, and a lock is exactly the device an operator must see.
+   * Add the missing domains, and keep a `risky` entity always visible.
+   * `useful` must never filter the preview, the risk confirmation or
+     the protected list. It is for the picker's default view only.
+2. **The device count reads current label membership, not the pins.**
+   It counts waiting joiners that are not pinned yet and ignores time
+   windows. Both overstate, which is the safe direction. Counting the
+   pinned `entities_json` would make it exact.
