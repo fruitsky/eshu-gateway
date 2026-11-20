@@ -2,6 +2,37 @@
 
 Status: **active** · Branch: `feature-roadmap` · Baseline: `master@5c0045f` (security chunks 1–5 + R + H merged), merged into this branch 2026-11-07
 
+## Major release
+
+**Feature freeze from 2026-11-19.** No new features until this release is
+deployed and tested; bug fixes only. Everything not listed here is reviewed
+after the release.
+
+**Steps**
+
+1. **Finish reviews.** X11 Stage 4, HA files includes, ha-files nits,
+   window-token routes, e2e-cleanup, f27-config-entry-suspend,
+   window-token-audit-migration, and the bug fixes in D.
+2. **Deploy to Dev and test.** The reviewer runs the E2E suite; the operator
+   tests hands-on.
+3. **`ssh_exec` on the two Dev gateways.** Test with Hermes and the E2E suite,
+   set `ssh_mode=mcp_only`, re-run the installer to drop the shared agent key,
+   then test again: direct agent SSH must be refused and the operator's own
+   admin access must still work.
+4. **Update the docs.** The agent manual and Hermes's skills for `ssh_exec` and
+   the new tools; check for `scp`, interactive and long-running use.
+5. **Roll out release 1.4 to the fleet** per `RELEASE_1.4.md`.
+6. **`ssh_exec` across the fleet.** Hermes tests every host, then a few days of
+   normal use with direct SSH as the fallback.
+7. **`mcp_only` + installer re-run on every fleet gateway**, test each one,
+   then close the release.
+
+**Hermes is the only SSH agent.**
+
+**After the major release:** F22, F16, F26, F21, F24, F25, X9, F17, F20, the
+legacy window-claim retirement, a per-device "never" for HA, and agent rename
+(CB14: the name lookups move to agent id first).
+
 This plan turns the feature analysis of 2026-11-06 into small, reviewable
 chunks. One agent (the **implementer**) builds one chunk per branch; a second
 agent (the **reviewer**) reviews the diff against the chunk's acceptance
