@@ -355,22 +355,92 @@ def test_an_unchanged_anchored_include_is_refused():
 
 class TestListShapedFiles:
     def test_an_include_on_a_line_after_a_list_block_is_checked(self):
-        body = ('- action: |\n'
+        body = ('- alias: x\n'
                 '  trigger: !include .storage/x.yaml\n')
         assert _code(validate_write, '/config/automations.yaml', body) == \
             'config_include_refused'
 
     def test_an_env_var_on_a_line_after_a_list_block_is_checked(self):
-        body = ('- action: |\n'
+        body = ('- alias: x\n'
                 '  trigger: !env_var SECRET\n')
         assert _code(validate_write, '/config/automations.yaml', body) == \
             'config_env_var_refused'
 
     def test_a_secrets_include_after_a_list_block_is_checked(self):
-        body = ('- action: |\n'
+        body = ('- alias: x\n'
                 '  trigger: !include secrets.yaml\n')
         assert _code(validate_write, '/config/automations.yaml', body) == \
             'config_secret_include_refused'
+
+
+class TestSameIndentLists:
+    def test_the_operator_shape_passes(self):
+        current = ('first:\n'
+                   '- themes: !include_dir_merge_named themes\n'
+                   'second:\n'
+                   '- themes: !include_dir_merge_named themes\n')
+        out = validate_write('/config/configuration.yaml', current,
+                             current=current)
+        assert [item['parent'] for item in out['grandfathered']] == [
+            ('first:',), ('second:',)]
+
+    def test_an_unchanged_include_cannot_move_to_the_other_key(self):
+        current = ('first:\n'
+                   '- themes: !include_dir_merge_named themes\n')
+        proposed = ('second:\n'
+                    '- themes: !include_dir_merge_named themes\n')
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_include_refused'
+
+    def test_two_keys_with_the_same_list_do_not_share_a_path(self):
+        current = ('first:\n'
+                   '- themes: !include_dir_merge_named themes\n'
+                   'second:\n')
+        proposed = ('first:\n'
+                    'second:\n'
+                    '- themes: !include_dir_merge_named themes\n')
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_include_refused'
+
+
+class TestMultilineQuotes:
+    def test_a_quoted_value_across_lines_is_refused(self):
+        assert _code(validate_write, '/config/x.yaml',
+                     'a: "one\n  two"\n') == 'config_yaml_multiline_quote'
+
+    def test_a_multiline_quote_cannot_hide_a_secrets_include(self):
+        body = ('a: "text\n'
+                '  b: !include secrets.yaml\n')
+        assert _code(validate_write, '/config/x.yaml', body) == \
+            'config_yaml_multiline_quote'
+
+    def test_an_apostrophe_in_a_plain_scalar_is_not_a_quote(self):
+        validate_write('/config/x.yaml', "note: it's fine\n")
+
+    def test_an_apostrophe_in_a_block_scalar_is_not_scanned(self):
+        body = ('note: |\n'
+                "  it's fine\n"
+                '  trigger: !include secrets.yaml\n')
+        assert validate_write('/config/x.yaml', body)['includes'] == []
+
+    def test_a_nested_block_scalar_is_skipped(self):
+        body = ('- action: >\n'
+                "   it's fine\n"
+                '   trigger: !include secrets.yaml\n')
+        assert validate_write('/config/automations.yaml', body)['includes'] == []
+
+    def test_a_bare_list_block_scalar_is_skipped(self):
+        body = ('- |\n'
+                "  it's fine\n"
+                '  !include secrets.yaml\n')
+        assert validate_write('/config/automations.yaml', body)['includes'] == []
+
+    def test_a_less_indented_block_scalar_line_is_refused(self):
+        body = ('note: |\n'
+                '    one\n'
+                '  two\n')
+        assert _code(validate_write, '/config/x.yaml', body) == \
+            'config_yaml_invalid'
 
 
 def test_a_nested_include_moved_to_another_parent_is_refused():

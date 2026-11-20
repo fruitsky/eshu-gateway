@@ -33,6 +33,7 @@ _TAG_RE = re.compile(r'!(%s|include|%s)\b' % (
     '|'.join(DIR_TAGS), '|'.join(OTHER_TAGS)))
 _BAD_TAG = re.compile(r'(^%TAG\b)|!<', re.MULTILINE)
 _TAB_INDENT = re.compile(r'^[ ]*\t', re.MULTILINE)
+_BLOCK_VALUE = re.compile(r'[|>](?:[1-9][+-]?|[+-][1-9]?)?$')
 
 # H4: top-level keys that turn a config file into code or an auth surface.
 RISKY_KEYS = ('shell_command', 'command_line', 'python_script',
@@ -122,7 +123,20 @@ def _decode_scalar(text):
     return text
 
 
+def _quote_opens(line, i):
+    """Whether a quote at `i` starts a scalar.
+
+    A plain scalar may contain an apostrophe (`it's`); YAML does not treat
+    that as an opening quote. Only a quote at a scalar boundary opens one.
+    """
+    if i == 0:
+        return True
+    prev = line[i - 1]
+    return prev not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-'
+
+
 def _strip_comment(line):
+    """The line without its comment, and the quote state at end of line."""
     out = []
     quote = None
     i = 0
@@ -138,7 +152,7 @@ def _strip_comment(line):
                 quote = None
             i += 1
             continue
-        if ch in '"\'':
+        if ch in '"\'' and _quote_opens(line, i):
             quote = ch
             out.append(ch)
         elif ch == '#' and (i == 0 or line[i - 1] in ' \t'):
@@ -146,7 +160,7 @@ def _strip_comment(line):
         else:
             out.append(ch)
         i += 1
-    return ''.join(out)
+    return ''.join(out), quote
 
 
 def _first_colon(line):
@@ -183,22 +197,44 @@ def _path_key(line):
     return _decode_scalar(text[:colon]).strip()
 
 
-def _opens_block_scalar(line, indent):
-    """Only a column-0 plain mapping key may open a block scalar.
+def _mapping_key_without_value(line):
+    """A plain `key:` line at the same indentation as a following `- ` list.
 
-    A `- key: |` or `? key: |` line is not treated as an opener: scanning its
-    deeper lines normally is stricter. If this is wrong about YAML, it can
-    only check more, never fewer, lines.
+    YAML allows the sequence and its owning key to share a column. Such a
+    line stays on the path when the list item is pushed.
     """
-    if indent != 0:
-        return False
     stripped = line.lstrip(' ')
-    if stripped.startswith('-') or stripped.startswith('?'):
+    if _is_list_item(stripped) or stripped.startswith('?'):
         return False
     colon = _first_colon(line)
-    if colon < 0:
-        return False
-    return line[colon + 1:].strip().startswith(('|', '>'))
+    return colon >= 0 and not line[colon + 1:].strip()
+
+
+def _block_scalar_opener(line):
+    """The opener column of a `|`/`>` block scalar, or None.
+
+    Covers a plain mapping key (`key: |`), a list item (`- key: |`) and a
+    bare list entry (`- |`). The returned column is the key's column after
+    any `- ` prefixes, or the dash's column for a bare `- |`.
+    """
+    stripped = line.lstrip(' ')
+    if not stripped:
+        return None
+    body = stripped
+    body_col = len(line) - len(stripped)
+    dash_col = None
+    while body.startswith('- '):
+        dash_col = body_col
+        rest = body[2:]
+        skip = len(rest) - len(rest.lstrip())
+        body = rest.lstrip()
+        body_col += 2 + skip
+    if _BLOCK_VALUE.fullmatch(body):
+        return dash_col if dash_col is not None else body_col
+    colon = _first_colon(body)
+    if colon >= 0 and _BLOCK_VALUE.fullmatch(body[colon + 1:].strip()):
+        return body_col
+    return None
 
 
 def _walk_lines(content):
@@ -206,35 +242,59 @@ def _walk_lines(content):
 
     Yields dicts with the comment-stripped line, its indentation, the full
     parent path (exact ancestor key/list-item lines) and the block-scalar
-    state. A block scalar skips only after a column-0 plain mapping key.
+    state. A nested block scalar is skipped by YAML's own indentation rule,
+    and a line that ends inside an open quote is refused.
     """
     path = []
     in_block = False
+    block_col = None
     block_indent = None
     for raw in str(content or '').splitlines():
-        line = _strip_comment(raw)
+        if in_block:
+            if not raw.strip():
+                continue
+            indent = len(raw) - len(raw.lstrip(' '))
+            if block_indent is None:
+                if indent > block_col:
+                    block_indent = indent
+                    continue
+                in_block = False
+            else:
+                if indent >= block_indent:
+                    continue
+                if indent > block_col:
+                    raise ConfigError(
+                        'config_yaml_invalid',
+                        'a block scalar line is indented less than its first '
+                        'content line')
+                in_block = False
+        line, quote = _strip_comment(raw)
+        if quote:
+            raise ConfigError(
+                'config_yaml_multiline_quote',
+                'a quoted value spans lines; use | or > instead')
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(' '))
-        if in_block:
-            if indent > block_indent:
-                continue
-            in_block = False
         stripped = line.lstrip(' ')
         if stripped.startswith('---') or stripped.startswith('...'):
             path = []
             continue
         while path and path[-1][0] >= indent:
+            if (_is_list_item(stripped) and path[-1][0] == indent
+                    and _mapping_key_without_value(path[-1][1])):
+                break
             path.pop()
         parent = tuple(item[1] for item in path)
         colon = _first_colon(line)
         key = _decode_scalar(line[:colon]).strip() if colon >= 0 else ''
-        block = _opens_block_scalar(line, indent)
+        block = _block_scalar_opener(line)
         yield {'line': line, 'indent': indent, 'parent': parent,
-               'key': key, 'block_scalar': block}
-        if block:
+               'key': key, 'block_scalar': block is not None}
+        if block is not None:
             in_block = True
-            block_indent = indent
+            block_col = block
+            block_indent = None
             continue
         if _is_list_item(stripped) or colon >= 0:
             path.append((indent, line))
