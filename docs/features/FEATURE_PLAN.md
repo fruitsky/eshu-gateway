@@ -10795,6 +10795,73 @@ ancestor key lines from the top-level key down.
 * Nested block scalars that are scanned as ordinary lines stay as they
   are, because that only makes the check stricter.
 
+### Security: includes round 2 (7bc144b)
+
+Read as code text only; nothing was run.
+
+**Approved once CB12 and CB13 are fixed.**
+
+**What holds.**
+
+* One walker, `_walk_lines`, now feeds `scan()`, the include matching and
+  the anchor matching, so the three cannot drift apart.
+* Only a column-0 plain mapping key opens a skipped block scalar. A `-` or
+  `?` line never does, so the deeper lines are scanned. That closes CB10.
+* CB11 holds. Anchor, alias and `<<:` lines are matched like include
+  lines: `(parent path, line)`, counted.
+* The parent path holds the exact ancestor lines, with list items as
+  steps.
+* The public docs describe the rule and not the old gap.
+
+**CB12 (must). A list at the same indentation as its key drops the key
+from the path.**
+
+* YAML allows a block sequence at the same indentation as the key that
+  owns it. HA configs written that way are common.
+* The stack pops every entry with indent `>=` the current line. A `-`
+  line at column 0 therefore pops its own top-level key.
+* Every line inside that list then has a parent path that starts at the
+  list item, with no top-level key.
+* Two top-level keys whose zero-indented lists hold items with the same
+  first line then give identical parent paths. A grandfathered line can
+  move from one key to the other.
+* That is weaker than the previous commit's top-level-key rule.
+* Fix: a list-item line does not pop a mapping-key entry at the same
+  indentation. It becomes that key's child.
+* Add a test with both shapes.
+
+**CB13 (must). Quote state resets on every line.** This is older than
+this branch; it comes from F11's `_strip_comment` and `_tag_args`.
+
+* Both functions start each line outside quotes. YAML lets a quoted
+  scalar span lines, in block and in flow context.
+* On the continuation line the walker's quote state is inverted. Text
+  YAML treats as real nodes can look quoted to the walker, and a `#` in
+  the string can look like a comment that hides the rest of the line.
+* A tag there is not checked: include targets, `!env_var` and
+  `secrets.yaml`.
+* Fix:
+  * Outside a skipped block scalar, refuse any line that ends inside an
+    open quote (`config_yaml_multiline_quote`). Multi-line quoted
+    scalars are rare in HA config; templates use `|` or `>`.
+  * If that refuses too much because apostrophes inside nested block
+    scalars are scanned as normal lines, skip nested block scalars too,
+    with YAML's own rule:
+    * The opener is any line whose value is `|` or `>` (with an
+      optional indicator), including `- key: |` and `- |`.
+    * Its column is the key's column after any `- ` prefixes, or the
+      dash's column for `- |`.
+    * The first content line sets the indent `m`.
+    * Skip lines indented `m` or more.
+    * Refuse a non-empty line indented between the opener's column and
+      `m`.
+* Keep the regression fixture in tests only, as with CB10.
+
+Nit: two items in the same list whose first lines are identical (two
+`- platform: template` items) share a path step, so a line can move
+between them. Adding the item's position among identical siblings would
+close it. Acceptable to leave.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
