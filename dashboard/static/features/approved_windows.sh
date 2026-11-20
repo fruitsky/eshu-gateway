@@ -29,6 +29,10 @@ _window_reject() {
 }
 
 if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/eshu-windows.txt ]; then
+  # The dashboard's token_fp is the first eight hex of SHA-256. The raw token
+  # must never appear in a syslog line; the hash is enough to correlate with
+  # the dashboard's audit row and useless for claiming a window.
+  ESHU_WINDOW_TOKEN_FP=$(printf '%s' "$ESHU_WINDOW_TOKEN" | sha256sum | cut -c1-8)
   now_ts=$(date +%s)
   # Get UTC day-of-week: 1=Mon..7=Sun, as bitmask 1=Mon..64=Sun
   dow_num=$(date -u +%u)  # 1=Mon..7=Sun
@@ -45,7 +49,7 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
 
     # Check expiry
     if [ "${win_xpires:-0}" != "0" ] && [ "${win_xpires:-0}" != "" ] && [ "$now_ts" -ge "${win_xpires:-0}" ]; then
-      logger -t eshu-gateway "WINDOW EXPIRED: token=${ESHU_WINDOW_TOKEN:0:8} expired at ${win_xpires}"
+      logger -t eshu-gateway "WINDOW EXPIRED: token_fp=${ESHU_WINDOW_TOKEN_FP} expired at ${win_xpires}"
       _window_reject "window expired"
     fi
 
@@ -129,13 +133,13 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
       fi
       case "$WINDOW_CLAIM_HTTP" in
         200) ;;
-        000) logger -t eshu-gateway "APPROVED WINDOW CLAIM UNREACHABLE: token=${ESHU_WINDOW_TOKEN:0:8} — failing open on local cache" ;;
+        000) logger -t eshu-gateway "APPROVED WINDOW CLAIM UNREACHABLE: token_fp=${ESHU_WINDOW_TOKEN_FP} — failing open on local cache" ;;
         *)
-          logger -t eshu-gateway "APPROVED WINDOW REJECTED: token=${ESHU_WINDOW_TOKEN:0:8} claim=$WINDOW_CLAIM_HTTP"
+          logger -t eshu-gateway "APPROVED WINDOW REJECTED: token_fp=${ESHU_WINDOW_TOKEN_FP} claim=$WINDOW_CLAIM_HTTP"
           _window_reject "window claim failed (HTTP $WINDOW_CLAIM_HTTP)"
           ;;
       esac
-      logger -t eshu-gateway "APPROVED WINDOW MATCH: token=${ESHU_WINDOW_TOKEN:0:8} cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
+      logger -t eshu-gateway "APPROVED WINDOW MATCH: token_fp=${ESHU_WINDOW_TOKEN_FP} cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
       RESULT_PATH="window"
       run_sanitized bash -c "$cmd"
     else

@@ -30,6 +30,11 @@ def npm_upstream():
     }
 
     class _Handler(http.server.BaseHTTPRequestHandler):
+        # Every response says close, even when urllib sent keep-alive. A
+        # lingering keep-alive connection made server_close() reset the next
+        # request on a loaded runner.
+        protocol_version = 'HTTP/1.1'
+
         def _path(self):
             from urllib.parse import urlparse
             return urlparse(self.path).path
@@ -39,8 +44,13 @@ def npm_upstream():
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
+            self.send_header('Connection', 'close')
+            self.close_connection = True
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def do_POST(self):
             p = self._path()
@@ -90,7 +100,12 @@ def npm_upstream():
         def log_message(self, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    class _Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 128
+        allow_reuse_address = True
+
+    server = _Server(('127.0.0.1', 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
