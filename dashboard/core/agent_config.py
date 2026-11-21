@@ -19,6 +19,7 @@ from core.web_fetch_policy import validate_policy as validate_web_policy
 from db.agent_policies import (
     get_agent_config_version, bump_agent_config_version, get_agent_policy,
     validate_policy, _validate_test_agent_policy, write_policy_row,
+    sync_ssh_tool,
 )
 from db.agent_tokens import get_agent
 from db.web_fetch import get_web_fetch_policy
@@ -737,6 +738,22 @@ def _write_web(conn, principal, web):
          int(time.time())))
 
 
+def ssh_host_words(hosts):
+    """Host labels in words: n8n (192.168.1.202), or any machine."""
+    from db.gateways import get_gateway
+    parts = []
+    for host in hosts or []:
+        host = str(host or '').strip()
+        if not host:
+            continue
+        if host == '*':
+            return 'any machine'
+        row = get_gateway(host) or {}
+        name = (row.get('hostname') or '').strip()
+        parts.append('%s (%s)' % (name, host) if name else host)
+    return ', '.join(parts)
+
+
 def _summary_sections(agent_name, policy_info, web_info, ha_diff,
                       waiting=None):
     changed = []
@@ -752,14 +769,11 @@ def _summary_sections(agent_name, policy_info, web_info, ha_diff,
                             % (len(tools['allow']),
                                '' if len(tools['allow']) == 1 else 's'))
         if ssh.get('changed'):
-            hosts = len(ssh['hosts'])
+            hosts = list(ssh['hosts'] or [])
             if not hosts:
                 bits.append('SSH off')
-            elif '*' in ssh['hosts']:
-                bits.append('SSH on any gateway')
             else:
-                bits.append('SSH on %d host%s'
-                            % (hosts, '' if hosts == 1 else 's'))
+                bits.append('can run commands on ' + ssh_host_words(hosts))
         if bits:
             changed.append({'section': 'tools', 'summary': '; '.join(bits)})
     if web_info and web_info.get('changed'):
@@ -822,6 +836,7 @@ def _validate_config(agent_id, document, version):
                                     hosts, ssh_mode)
         except ValueError as exc:
             _error(400, str(exc), 'invalid_config')
+        sync_ssh_tool(clean)
         clean['test_agent'] = bool(current_policy.get('test_agent'))
         if clean['test_agent']:
             try:
@@ -897,6 +912,12 @@ def _audit_changes(current_policy, policy, policy_touched, current_web, state):
             parts.append('ssh.hosts %s->%s'
                          % (_json.dumps(old_hosts),
                             _json.dumps(new_hosts)))
+        old_tools = set(current_policy.get('tools') or [])
+        new_tools = set(policy.get('tools') or [])
+        if ('ssh_exec' in old_tools) != ('ssh_exec' in new_tools):
+            parts.append('tools.ssh_exec %s->%s'
+                         % ('on' if 'ssh_exec' in old_tools else 'off',
+                            'on' if 'ssh_exec' in new_tools else 'off'))
         old_approval = current_policy.get('approval') or {}
         for key, value in (policy.get('approval') or {}).items():
             if value == 'ungated' and old_approval.get(key) != 'ungated':

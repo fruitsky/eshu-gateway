@@ -269,11 +269,18 @@
       dismissedLine +
       '<div class="x11-btn-row">' + buttons + '</div></div>';
   }
+  function hostLabel(host) {
+    host = String(host || '').trim();
+    if (host === '*') return 'Any machine';
+    var g = (S.gateways || []).filter(function (x) { return x.ip === host; })[0];
+    var name = g && (g.hostname || '').trim();
+    return name ? name + ' \u00b7 ' + host : host;
+  }
   function sshText(cfg) {
     var hosts = ((cfg || S.draft || {}).ssh || {}).hosts || [];
     if (!hosts.length) return 'off';
-    if (hosts.indexOf('*') !== -1) return 'any gateway';
-    return hosts.length + ' host' + (hosts.length === 1 ? '' : 's');
+    if (hosts.indexOf('*') !== -1) return 'any machine';
+    return hosts.map(hostLabel).join(', ');
   }
   function webText(cfg) {
     var w = ((cfg || S.draft || {}).websites) || {};
@@ -311,7 +318,8 @@
     if (c.depends) parts.push(c.depends + ' depend on the call');
     if (c.frozen) parts.push(c.frozen + ' frozen');
     parts = parts.concat(deviceSummaryFor(cfg));
-    parts.push('SSH ' + sshText(cfg));
+    parts.push(sshText(cfg) === 'off' ? 'No machines'
+      : 'Run commands on: ' + sshText(cfg));
     return parts.join(' \u00b7 ');
   }
 
@@ -1375,7 +1383,7 @@
     var waitHtml = waits.length ? '<div class="x11-waiting-list" data-waiting-list>' +
       '<h3>Waiting to join</h3>' + waits.map(waitingRowHtml).join('') + '</div>' : '';
     var tests = '<details class="x11-e2e"><summary>Test agent and E2E approver tokens</summary>' +
-      '<p class="x11-section-sub">A test agent may only use HA reads and call service, with exactly one SSH host. An approver token can decide only its E2E rows.</p>' +
+      '<p class="x11-section-sub">A test agent may only use HA reads, call service and ssh_exec, with exactly one SSH host. An approver token can decide only its E2E rows.</p>' +
       '<label class="x11-plain"><input type="checkbox" id="agent-test-toggle" onchange="x11ToggleTestAgent(this)"' +
       ((S.policy && S.policy.test_agent) ? ' checked' : '') + '> This agent is a test agent</label>' +
       '<p class="x11-section-sub" id="agent-test-hint">' +
@@ -2603,7 +2611,7 @@
     all.sort();
     var hostHtml = all.map(function (ip) {
       return '<label><input type="checkbox" data-ssh-host="' + attr(ip) + '"' + (hosts.indexOf(ip) !== -1 ? ' checked' : '') +
-        ' onchange="x11ToggleHost(this)"> <span>' + esc(ip) + '</span></label>';
+        ' onchange="x11ToggleHost(this)"> <span>' + esc(hostLabel(ip)) + '</span></label>';
     }).join('');
     return '<label class="x11-plain">Mode <select data-ssh-mode onchange="x11SetSshMode(this)">' +
       '<option value="read_only"' + (ssh.mode === 'read_only' ? ' selected' : '') + '>Read only</option>' +

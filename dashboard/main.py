@@ -4506,6 +4506,10 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
             or policy['ssh_mode'] != before['ssh_mode']):
         ssh_note = (f", ssh_mode={policy['ssh_mode']}, ssh_hosts="
                     f"{','.join(policy['ssh_hosts_allow']) or 'none'}")
+    if ('ssh_exec' in (before.get('tools') or [])) != (
+            'ssh_exec' in (policy.get('tools') or [])):
+        ssh_note += (", ssh_exec="
+                     f"{'on' if 'ssh_exec' in policy.get('tools') else 'off'}")
     record_audit_event(
         "agent_policy_updated",
         details=f"Policy for agent '{agent['name']}' updated "

@@ -40,6 +40,8 @@ def _agent(test_agent=True, mode='normal', hosts=None, tools_mode='allowlist'):
         'test_agent': test_agent, 'ssh_mode': mode,
         'ssh_hosts_allow': [GATEWAY] if hosts is None else hosts,
         'tools_mode': tools_mode,
+        'tools': ['home_assistant_list_entities',
+                  'home_assistant_call_service', 'ssh_exec'],
     }}
 
 
@@ -113,6 +115,13 @@ class TestTestAgentGuard:
 
     def test_the_narrow_policy_passes(self):
         assert run.check_test_agent(_agent(), self._cfg())['test_agent'] is True
+
+    def test_the_allowlist_must_hold_ssh_exec(self):
+        agent = _agent()
+        agent['policy']['tools'] = ['home_assistant_call_service']
+        with pytest.raises(run.UnsafeConfig) as exc:
+            run.check_test_agent(agent, self._cfg())
+        assert 'ssh_exec' in str(exc.value)
 
     @pytest.mark.parametrize('agent', [
         _agent(test_agent=False),

@@ -20,6 +20,7 @@ DEFAULT_RATE_LIMIT = 0
 # new agent cannot reach SSH until the operator opts in per host.
 SSH_MODES = ('read_only', 'approval', 'normal')
 DEFAULT_SSH_MODE = 'approval'
+SSH_EXEC_TOOL = 'ssh_exec'
 
 
 def init_agent_policies_tables(cursor):
@@ -266,6 +267,7 @@ def set_agent_policy(agent_id, tools_mode=None, tools=None, arg_policy=None,
         test_agent = current['test_agent']
     clean = validate_policy(tools_mode, tools, arg_policy, approval,
                             rate_limit_per_min, ssh_hosts_allow, ssh_mode)
+    sync_ssh_tool(clean)
     clean['test_agent'] = bool(test_agent)
     if clean['test_agent']:
         _validate_test_agent_policy(clean)
@@ -305,7 +307,7 @@ def _validate_test_agent_policy(clean):
     bad = [t for t in (clean.get('tools') or []) if t not in allowed]
     if bad:
         raise ValueError(
-            'a test agent may only use HA reads and call_service; not: '
+            'a test agent may only use HA reads, call_service and ssh_exec; not: '
             + ', '.join(bad[:5]))
 
 
@@ -326,7 +328,28 @@ def _test_agent_tool_keys():
     # configured, still allow the canonical call_service key so the operator
     # can prepare the policy before adding the integration.
     out.add('home_assistant_call_service')
+    # The E2E test agent runs `ssh_exec`; an allowlist agent gets that exact
+    # key from its Run commands settings (not a separate tool switch).
+    out.add(SSH_EXEC_TOOL)
     return out
+
+
+def sync_ssh_tool(clean):
+    """Make SSH access one setting: hosts in means `ssh_exec` in.
+
+    For an allowlist agent the `ssh_exec` key is derived from
+    `ssh_hosts_allow` on every write. Removing the last host removes the key.
+    An all-tools agent needs no key, and its stored allowlist is left alone.
+    """
+    if clean.get('tools_mode') != 'allowlist':
+        return clean
+    tools = set(clean.get('tools') or [])
+    if clean.get('ssh_hosts_allow'):
+        tools.add(SSH_EXEC_TOOL)
+    else:
+        tools.discard(SSH_EXEC_TOOL)
+    clean['tools'] = sorted(tools)
+    return clean
 
 
 def agent_has_activity(agent_id: int) -> bool:

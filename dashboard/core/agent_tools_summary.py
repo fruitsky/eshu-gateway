@@ -12,7 +12,7 @@ import json
 import time
 
 from core import allowances
-from core.agent_config import get_agent_config
+from core.agent_config import get_agent_config, ssh_host_words
 from core.agent_policy import safe_ident, static_tool_decision
 from core.seeds import seed_label
 from db.agent_policies import get_agent_policy
@@ -320,13 +320,38 @@ def build(agent_id):
     ssh = (config.get('ssh') or {})
     hosts = ssh.get('hosts') or []
     mode = ssh.get('mode') or 'approval'
-    ssh_extra = ('%d hosts' % len(hosts) if hosts else 'No hosts yet')
-    if len(hosts) == 1 and hosts[0] == '*':
-        ssh_extra = 'Any gateway'
-    ssh_run = 1 if hosts and mode == 'normal' else 0
-    ssh_ask = 1 if hosts and mode != 'normal' else 0
-    tiles.append(_tile('SSH', 'ssh', 1, ssh_run, ssh_ask, extra=ssh_extra,
-                       in_use=bool(hosts), virtual=True))
+    # The SSH tile is the same static decision the agent's `ssh_exec` gets:
+    # allowlist, caller, approval and gate mode. Running commands is not
+    # implied by a host list alone. `ssh_mode` maps to the decision this way:
+    # approval -> always ask; normal -> depends on the gateway's policy;
+    # read_only -> a read-only run.
+    ssh_tool = {
+        'name': 'exec',
+        'read_only': mode == 'read_only',
+        'always_gate': mode == 'approval',
+    }
+    ssh_owner = {
+        'name': 'ssh',
+        'gate_mode': 'all' if mode == 'approval' else 'destructive',
+    }
+    ssh_decision = static_tool_decision(agent, ssh_owner, 'exec', ssh_tool,
+                                        frozen=frozen)
+    if not hosts:
+        ssh_decision = {'outcome': 'none', 'allowed': False, 'frozen': False,
+                        'reason': 'no SSH hosts'}
+    ssh_outcome = ssh_decision['outcome']
+    tool_outcomes['ssh_exec'] = ssh_outcome
+    frozen_tools['ssh_exec'] = bool(ssh_decision.get('frozen'))
+    ssh_extra = ('No hosts yet' if not hosts
+                 else 'Any machine' if hosts == ['*']
+                 else 'On ' + ssh_host_words(hosts))
+    tiles.append(_tile(
+        'SSH', 'ssh', 1,
+        1 if ssh_outcome == 'run' else 0,
+        1 if ssh_outcome == 'ask' else 0,
+        1 if ssh_outcome == 'depends' else 0,
+        1 if ssh_decision.get('frozen') else 0,
+        extra=ssh_extra, in_use=ssh_outcome != 'none', virtual=True))
 
     web = (config.get('websites') or {})
     sites = web.get('allow') or []

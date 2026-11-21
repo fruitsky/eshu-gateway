@@ -47,7 +47,7 @@ def test_x4_tools_save_keeps_ssh_and_rules(auth_client):
         'approval': {'a_b': 'gated'}, 'rate_limit_per_min': 7,
         'ssh_hosts_allow': ['192.0.2.10'], 'ssh_mode': 'read_only'})
     got = _put(auth_client, aid, {'tools_mode': 'allowlist', 'tools': ['c_d']})
-    assert got['tools'] == ['c_d']
+    assert got['tools'] == ['c_d', 'ssh_exec']
     assert got['ssh_hosts_allow'] == ['192.0.2.10']
     assert got['ssh_mode'] == 'read_only'
     assert got['rate_limit_per_min'] == 7
@@ -65,7 +65,7 @@ def test_x4_ssh_save_keeps_tools_rules_and_rate(auth_client):
         'ssh_hosts_allow': ['192.0.2.11'], 'ssh_mode': 'normal'})
     assert got['ssh_hosts_allow'] == ['192.0.2.11']
     assert got['ssh_mode'] == 'normal'
-    assert got['tools'] == ['a_b', 'c_d']
+    assert got['tools'] == ['a_b', 'c_d', 'ssh_exec']
     assert got['tools_mode'] == 'allowlist'
     assert got['approval'] == {'a_b': 'gated'}
     assert got['rate_limit_per_min'] == 3
@@ -80,7 +80,7 @@ def test_x4_rules_save_keeps_tools_and_ssh(auth_client):
         'rate_limit_per_min': 9, 'approval': {'a_b': 'gated'}})
     assert got['rate_limit_per_min'] == 9
     assert got['approval'] == {'a_b': 'gated'}
-    assert got['tools'] == ['a_b']
+    assert got['tools'] == ['a_b', 'ssh_exec']
     assert got['ssh_hosts_allow'] == ['*']
     assert got['ssh_mode'] == 'normal'
 

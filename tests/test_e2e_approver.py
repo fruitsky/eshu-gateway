@@ -596,6 +596,19 @@ class TestTestAgent:
         # A non-HA tool is refused.
         with pytest.raises(ValueError):
             set_agent_policy(aid, tools=['whereis'], test_agent=True)
+        # `ssh_exec` is the one non-HA key a test agent may hold; a lookalike
+        # is still refused.
+        with pytest.raises(ValueError):
+            set_agent_policy(aid, tools=['ssh_exec_extra'], test_agent=True)
+        policy = set_agent_policy(
+            aid, tools=['home_assistant_call_service', 'ssh_exec'],
+            ssh_hosts_allow=[GATEWAY], ssh_mode='normal', test_agent=True)
+        assert policy['tools'] == ['home_assistant_call_service', 'ssh_exec']
+        # The key is derived from the one host, not a second switch.
+        policy = set_agent_policy(
+            aid, tools=['home_assistant_call_service'],
+            ssh_hosts_allow=[GATEWAY], ssh_mode='normal', test_agent=True)
+        assert policy['tools'] == ['home_assistant_call_service', 'ssh_exec']
 
     def test_an_agent_with_activity_cannot_become_a_test_agent(self, auth_client):
         _raw, aid = self._ready_agent('e2e-used')

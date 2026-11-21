@@ -180,6 +180,34 @@ def test_summary_and_tiles_use_one_counting_rule(monkeypatch):
     assert web['extra'] == 'No sites allowed'
 
 
+@pytest.mark.parametrize('mode, expected', [
+    ('normal', 'depends'), ('approval', 'ask'), ('read_only', 'run')])
+def test_the_ssh_tile_uses_the_same_static_decision(monkeypatch, mode, expected):
+    agent_id = _agent()
+    agent_policies.set_agent_policy(
+        agent_id, tools_mode='allowlist',
+        tools=['home_assistant_call_service'],
+        ssh_hosts_allow=['192.0.2.10'], ssh_mode=mode)
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [])
+    payload = summary.build(agent_id)
+    ssh = [t for t in payload['tiles'] if t['name'] == 'SSH'][0]
+    assert payload['tool_outcomes']['ssh_exec'] == expected
+    assert (ssh['run'], ssh['ask'], ssh['depends']) == (
+        (1, 0, 0) if expected == 'run' else
+        (0, 1, 0) if expected == 'ask' else (0, 0, 1))
+    assert 'ssh_exec' in agent_policies.get_agent_policy(agent_id)['tools']
+    assert ssh['extra'] == 'On 192.0.2.10'
+
+
+def test_the_ssh_tile_does_not_run_on_hosts_alone(monkeypatch):
+    agent_id = _agent()
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [])
+    payload = summary.build(agent_id)
+    ssh = [t for t in payload['tiles'] if t['name'] == 'SSH'][0]
+    assert payload['tool_outcomes']['ssh_exec'] == 'none'
+    assert ssh['run'] == 0 and ssh['usable'] == 0 and ssh['in_use'] is False
+
+
 def test_allowlist_and_explicit_approval_change_the_same_totals(monkeypatch):
     agent_id = _agent()
     _ha_and_sonarr()
@@ -302,6 +330,9 @@ def test_every_seeded_tool_matches_the_shared_decision(monkeypatch):
     owners = {safe_ident(i['name']).lower(): i
               for i in integrations.get_integrations()}
     for name, outcome in payload['tool_outcomes'].items():
+        if name == 'ssh_exec':
+            # The SSH tile has its own synthetic owner; pinned below.
+            continue
         key = next(key for key in sorted(owners, key=len, reverse=True)
                    if name.startswith(key + '_'))
         owner = owners[key]

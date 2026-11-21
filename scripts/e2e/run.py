@@ -112,6 +112,8 @@ def check_test_agent(agent, cfg):
         raise UnsafeConfig('ssh_hosts_allow must be exactly the test gateway')
     if policy.get('tools_mode') != 'allowlist':
         raise UnsafeConfig('the test agent must use an allowlist')
+    if 'ssh_exec' not in (policy.get('tools') or []):
+        raise UnsafeConfig('the test agent allowlist must contain ssh_exec')
     return policy
 
 

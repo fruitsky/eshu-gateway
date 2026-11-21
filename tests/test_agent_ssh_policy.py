@@ -16,7 +16,7 @@ def test_tools_only_save_keeps_ssh_fields():
     p = get_agent_policy(aid)
     assert p['ssh_hosts_allow'] == ['10.0.0.5']
     assert p['ssh_mode'] == 'normal'
-    assert p['tools'] == ['x_y']
+    assert p['tools'] == ['ssh_exec', 'x_y']
 
 
 def test_empty_list_clears_hosts():

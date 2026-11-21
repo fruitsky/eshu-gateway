@@ -95,16 +95,71 @@ def test_absent_fields_keep_their_stored_value(auth_client, agent, ha):
                      tools=['home_assistant_call_service'],
                      ssh_hosts_allow=['192.0.2.10'], ssh_mode='approval')
     got = _get(auth_client, agent['id'])
-    assert got['tools']['allow'] == ['home_assistant_call_service']
+    # SSH hosts imply the one `ssh_exec` key; there is no separate tool switch.
+    assert got['tools']['allow'] == ['home_assistant_call_service', 'ssh_exec']
     r = _put(auth_client, agent['id'],
              {'schema_version': 1, 'ssh': {'mode': 'normal'}}, got['version'])
     assert r.status_code == 200, r.text
     after = _get(auth_client, agent['id'])
     assert after['ssh']['mode'] == 'normal'
-    assert after['tools']['allow'] == ['home_assistant_call_service']
+    assert after['tools']['allow'] == ['home_assistant_call_service', 'ssh_exec']
     assert after['tools']['mode'] == 'allowlist'
     assert after['websites'] == got['websites']
     assert after['home_assistant'] == got['home_assistant']
+
+
+def test_ssh_hosts_add_and_remove_ssh_exec_in_the_same_s5_write(
+        auth_client, agent, ha):
+    register_gateway('192.0.2.10', 'web01.example.test', 'v-test')
+    set_agent_policy(agent['id'], tools_mode='allowlist',
+                     tools=['home_assistant_call_service'])
+    got = _get(auth_client, agent['id'])
+    assert 'ssh_exec' not in got['tools']['allow']
+    document = {'schema_version': 1, 'ssh': {
+        'mode': 'normal', 'hosts': ['192.0.2.10']}}
+    preview = _put(auth_client, agent['id'], document, got['version'],
+                   preview=True)
+    assert preview.status_code == 200, preview.text
+    assert 'can run commands on web01.example.test (192.0.2.10)' in preview.text
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent['id'])
+    assert 'ssh_exec' in after['tools']['allow']
+
+    document = {'schema_version': 1, 'ssh': {'mode': 'normal', 'hosts': []}}
+    r = _put(auth_client, agent['id'], document, after['version'])
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent['id'])
+    assert 'ssh_exec' not in after['tools']['allow']
+
+    from db.audit import get_audit_log
+    rows = [x for x in get_audit_log(30)
+            if x['event_type'] == 'agent_config_updated']
+    assert any('tools.ssh_exec off->on' in r['details'] for r in rows)
+    assert any('tools.ssh_exec on->off' in r['details'] for r in rows)
+
+
+def test_the_policy_endpoint_derives_ssh_exec_and_audits_the_same_row(
+        auth_client, agent, ha):
+    set_agent_policy(agent['id'], tools_mode='allowlist',
+                     tools=['home_assistant_call_service'])
+    r = auth_client.put('/api/agents/%d/policy' % agent['id'], json={
+        'ssh_hosts_allow': ['192.0.2.10'], 'ssh_mode': 'normal'})
+    assert r.status_code == 200, r.text
+    assert r.json()['tools'] == ['home_assistant_call_service', 'ssh_exec']
+    assert r.json()['rate_limit_per_min'] == 0
+    from db.audit import get_audit_log
+    rows = [x for x in get_audit_log(20)
+            if x['event_type'] == 'agent_policy_updated']
+    assert any('ssh_exec=on' in row['details'] for row in rows)
+
+    r = auth_client.put('/api/agents/%d/policy' % agent['id'], json={
+        'ssh_hosts_allow': []})
+    assert r.status_code == 200, r.text
+    assert 'ssh_exec' not in r.json()['tools']
+    rows = [x for x in get_audit_log(20)
+            if x['event_type'] == 'agent_policy_updated']
+    assert any('ssh_exec=off' in row['details'] for row in rows)
 
 
 def test_a_protected_device_is_refused_even_with_a_tools_change(
