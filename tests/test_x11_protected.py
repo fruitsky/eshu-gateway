@@ -198,6 +198,32 @@ def test_a_renamed_protected_entity_is_refused_by_registry_id(
     assert hit is None
 
 
+def test_protection_does_not_suspend_a_label_row(
+        auth_client, agent_id, ha):
+    """Security's answer (CB17): a label row does not switch off its peers."""
+    from db.audit import get_audit_log
+    a.ensure_initialised()
+    ha['switch.plug']['labels'] = ['lbl-1']
+    ha['switch.other']['labels'] = ['lbl-1']
+    row = a.create_allowance(
+        'operator', agent_id, 'Label', 'switch', 'turn_off',
+        ['switch.plug', 'switch.other'], source_label_id='lbl-1')
+    a.set_protected_entities('operator', ['switch.plug'])
+    kept = a.get_allowance(row['id'])
+    assert kept['suspended_at'] == 0
+    assert kept['suspended_reason'] == ''
+    held = {p['entity_id'] for p in json.loads(kept['entities_json'])}
+    assert held == {'switch.plug', 'switch.other'}
+    # The label row is not a grant route for the protected device; the match
+    # still refuses on its pins.
+    hit = a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
+        'domain': 'switch', 'service': 'turn_off',
+        'data': {'entity_id': 'switch.plug'}})
+    assert hit is None
+    assert 'allowance_protected_refused' in [
+        x['event_type'] for x in get_audit_log(30)]
+
+
 def test_a_label_containing_a_protected_device_says_which_and_what_to_do(
         auth_client, agent_id, ha):
     ha['switch.other']['labels'] = ['lbl-1']

@@ -737,9 +737,18 @@ def set_protected_entities(actor, entities):
             try:
                 conn.execute('BEGIN IMMEDIATE')
                 rows = conn.execute(
-                    'SELECT id, agent_id, suspended_at, entities_json '
-                    'FROM allowances WHERE revoked_at = 0').fetchall()
+                    'SELECT id, agent_id, suspended_at, entities_json, '
+                    'source_label_id FROM allowances WHERE revoked_at = 0'
+                ).fetchall()
                 for row in rows:
+                    # Security's answer (CB17): do not suspend a label row.
+                    # A label grants only its pins; refresh_labels drops a
+                    # protected device before it can join, and the match
+                    # still refuses one. Suspending the whole row would let
+                    # one protected device switch off every other device in
+                    # the label.
+                    if row['source_label_id']:
+                        continue
                     try:
                         pins = _json.loads(row['entities_json'] or '[]')
                     except (TypeError, ValueError):
@@ -1052,10 +1061,36 @@ def _risk_for(domain, entities):
 CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
 
 
+def _protected_refusal(item, conn=None):
+    """Refuse a permission whose pins or entities hit a protected device.
+
+    CB17: this is called only for rows a save will actually write. Unchanged
+    rows stay in the diff's `keep` and are never written, so an exactly
+    unchanged suspended protected row does not need an exemption.
+    """
+    hits = _protected_hits(pins=item.get('pins') or [],
+                           entities=item.get('entities') or [],
+                           conn=conn)
+    if not hits:
+        return
+    first = hits[0]['entity_id']
+    label = item.get('label_id') or item.get('source_label') or ''
+    if label:
+        message = ('Protected: %s is in label %s. Unprotect it, or pick '
+                   'devices instead of the label.' % (first, label))
+    else:
+        message = ('Protected: no agent can be given %s. Unprotect it '
+                   'first.' % first)
+    raise AllowanceError(
+        400, message,
+        {'code': 'protected_device',
+         'entities': [r['entity_id'] for r in hits]})
+
+
 def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
                         expires_at=0, risk_ack=False, registry=None,
                         return_risk=False, source_label='',
-                        allow_protected=False):
+                        check_protected=True):
     """Every save/apply check, in one place, without writing anything.
 
     Returns `(entities, pins)`, or `(entities, pins, risk)` when
@@ -1094,19 +1129,9 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
         pins.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
     # S3/CB5: refuse on the entity id or the registry id captured at protect
     # time, so a renamed protected entity cannot be granted under its new name.
-    hits = [] if allow_protected else _protected_hits(pins=pins, entities=entities)
-    if hits:
-        first = hits[0]['entity_id']
-        if source_label:
-            message = ('Protected: %s is in label %s. Unprotect it, or pick '
-                       'devices instead of the label.' % (first, source_label))
-        else:
-            message = ('Protected: no agent can be given %s. Unprotect it '
-                       'first.' % first)
-        raise AllowanceError(
-            400, message,
-            {'code': 'protected_device',
-             'entities': [r['entity_id'] for r in hits]})
+    if check_protected:
+        _protected_refusal({'pins': pins, 'entities': entities,
+                            'label_id': source_label})
     risky_row, risky_entities = _risk_for(domain, entities)
     risk = {'risky_row': risky_row, 'risky_entities': risky_entities}
     if (risky_row or risky_entities) and not risk_ack:
@@ -1131,33 +1156,18 @@ def _ceiling_allows_conn(conn, domain, service):
 def _recheck_conn(conn, prepared):
     """Re-check the ceiling and protection inside an apply transaction.
 
+    CB17: callers pass only the rows the save will write (changed and added).
     A ceiling or protection write that landed after validation must not let
     an already-validated row through.
     """
     for item in prepared:
         domain = item['domain']
         service = item['service']
-        pins = item.get('pins') or []
         if not _ceiling_allows_conn(conn, domain, service):
             raise AllowanceError(
                 400, 'The ceiling no longer allows %s.%s; reload and retry.'
                      % (domain, service), {'code': 'ceiling_changed'})
-        hits = ([] if item.get('protected_exempt') else
-                _protected_hits(pins=pins, conn=conn))
-        if hits:
-            first = hits[0]['entity_id']
-            label = item.get('label_id') or item.get('source_label') or ''
-            if label:
-                message = ('Protected: %s is in label %s. Unprotect it, or '
-                           'pick devices instead of the label.'
-                           % (first, label))
-            else:
-                message = ('Protected: no agent can be given %s. Unprotect it '
-                           'first.' % first)
-            raise AllowanceError(
-                400, message,
-                {'code': 'protected_device',
-                 'entities': [r['entity_id'] for r in hits]})
+        _protected_refusal(item, conn=conn)
 
 
 def _insert_allowance(conn, agent_id, name, domain, service, entities, pins,

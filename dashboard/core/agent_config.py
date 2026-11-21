@@ -151,7 +151,7 @@ def _permission_from_row(row):
     return _permission_signature(row)
 
 
-def _normalise_permission(raw, index, registry, protected_exempt=None):
+def _normalise_permission(raw, index, registry):
     where = 'permissions[%d]' % index
     if not isinstance(raw, dict):
         _error(400, '%s must be an object.' % where, 'invalid_permission')
@@ -190,16 +190,10 @@ def _normalise_permission(raw, index, registry, protected_exempt=None):
         if not isinstance(entities, list):
             _error(400, '%s.entities must be a list.' % where,
                    'invalid_permission')
-    provisional = {'domain': domain, 'service': service,
-                   'label_id': label, 'entities': entities,
-                   'rate_per_hour': rate, 'window': window,
-                   'expires_at': expires_at}
-    exempt = bool(protected_exempt and
-                  _permission_exempt_key(provisional) in protected_exempt)
     entities, pins, risk = _allowances._validate_allowance(
         domain, service, entities, rate_per_hour=rate, window=window,
         expires_at=expires_at, risk_ack=True, registry=registry,
-        return_risk=True, source_label=label, allow_protected=exempt)
+        return_risk=True, source_label=label, check_protected=False)
     item = {
         'name': str(raw.get('name') or '')[:80],
         'domain': domain,
@@ -212,7 +206,6 @@ def _normalise_permission(raw, index, registry, protected_exempt=None):
         '_provided': provided,
         'pins': pins,
         'risk': risk,
-        'protected_exempt': exempt,
     }
     if not item['name']:
         row = _allowances.catalogue_row(_allowances.INTEGRATION,
@@ -222,32 +215,14 @@ def _normalise_permission(raw, index, registry, protected_exempt=None):
     return item
 
 
-def _protected_exempt_keys(rows):
-    """Keys of rows already paused because protecting them was refused.
-
-    An S5 save that leaves such a row exactly as it is may proceed; the row
-    stays suspended. A changed entity set is not exempt, so protection still
-    refuses a new grant."""
-    out = set()
-    for row in rows or []:
-        if (row.get('suspended_reason') or '') != 'protected':
-            continue
-        out.add(_permission_signature(row))
-    return out
-
-
-def _permission_exempt_key(item):
-    return _permission_signature(item)
-
-
-def prepare_permissions(raw_permissions, registry=None, protected_exempt=None):
+def prepare_permissions(raw_permissions, registry=None):
     if not isinstance(raw_permissions, list):
         _error(400, 'permissions must be a list.', 'invalid_permission')
     if len(raw_permissions) > 64:
         _error(400, 'At most 64 permissions are allowed.', 'invalid_permission')
     if registry is None:
         registry = _allowances._ha_registry()
-    prepared = [_normalise_permission(raw, i, registry, protected_exempt)
+    prepared = [_normalise_permission(raw, i, registry)
                 for i, raw in enumerate(raw_permissions)]
     # Two rows that match the same call make the matcher ambiguous. Refuse
     # duplicates and overlaps here, before anything is written.
@@ -274,19 +249,33 @@ def _group_key(item):
 
 
 def _diff_permissions(current, prepared):
+    """Match exact copies first, then pair the rest by group and list order.
+
+    CB17: a non-exact item must not consume another item's exact row. Without
+    the separate first pass, an earlier permission in the same group could
+    take the suspended protected row, and the exact copy would be written as
+    a new live grant.
+    """
     used = set()
     keep = []
-    changed = []
-    added = []
+    remaining = []
     for item in prepared:
         candidates = [r for r in current
-                      if r['id'] not in used and _group_key(r) == _group_key(item)]
+                      if r['id'] not in used
+                      and _group_key(r) == _group_key(item)]
         exact = next((r for r in candidates
                       if _permission_from_row(r) == item['signature']), None)
         if exact is not None:
             used.add(exact['id'])
             keep.append((exact, item))
-            continue
+        else:
+            remaining.append(item)
+    changed = []
+    added = []
+    for item in remaining:
+        candidates = [r for r in current
+                      if r['id'] not in used
+                      and _group_key(r) == _group_key(item)]
         if candidates:
             old = candidates[0]
             used.add(old['id'])
@@ -312,6 +301,19 @@ def _diff_permissions(current, prepared):
                if r['id'] not in used and r['id'] not in changed_ids]
     return {'keep': keep, 'changed': changed, 'added': added,
             'removed': removed}
+
+
+def _check_protected_diff(diff):
+    """Refuse a protected device only in rows this save will write.
+
+    CB17: `keep` rows are not written. Running the protection check after the
+    diff therefore lets an exactly unchanged suspended row through while a
+    new or changed row still cannot grant the device.
+    """
+    for _old, new in diff['changed']:
+        _allowances._protected_refusal(new)
+    for new in diff['added']:
+        _allowances._protected_refusal(new)
 
 
 def _action(item):
@@ -546,8 +548,9 @@ def _permission_view(diff, names):
     }
 
 
-def _write_ha_diff(conn, agent_id, diff, actor, now, prepared=None):
-    _allowances._recheck_conn(conn, prepared or [])
+def _write_ha_diff(conn, agent_id, diff, actor, now):
+    written = [new for _old, new in diff['changed']] + list(diff['added'])
+    _allowances._recheck_conn(conn, written)
     ha_id, ha_fp = _allowances._ha_pin()
     revoked = []
     created = []
@@ -602,10 +605,9 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
     current_version = _check_version(agent_id, version)
     registry = _allowances._ha_registry()
     current = _current_ha_rows(agent_id)
-    prepared = prepare_permissions(
-        permissions, registry=registry,
-        protected_exempt=_protected_exempt_keys(current))
+    prepared = prepare_permissions(permissions, registry=registry)
     diff = _diff_permissions(current, prepared)
+    _check_protected_diff(diff)
     names = _name_map(prepared + current)
     risks = _risk_items(prepared)
     resumes = _resumes(diff)
@@ -654,6 +656,7 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
                        'reload it.', 'config_changed', version=tx_version)
             tx_current = _current_ha_rows(agent_id, conn=conn)
             tx_diff = _diff_permissions(tx_current, prepared)
+            _check_protected_diff(tx_diff)
             tx_resumes = _resumes(tx_diff)
             tx_waiting = _waiting(tx_diff)
             tx_hash = _preview_hash(tx_version, prepared, risks,
@@ -668,7 +671,7 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
                        'confirm it.', 'resume_ack_required',
                        resumes=tx_resumes)
             revoked, created = _write_ha_diff(
-                conn, agent_id, tx_diff, actor, now, prepared=prepared)
+                conn, agent_id, tx_diff, actor, now)
             new_version = bump_agent_config_version(agent_id, conn)
             conn.commit()
         except Exception:
@@ -901,10 +904,9 @@ def _validate_config(agent_id, document, version):
         else:
             registry = _allowances._ha_registry()
             current_ha = _current_ha_rows(agent_id)
-            prepared = prepare_permissions(
-                raw['permissions'], registry=registry,
-                protected_exempt=_protected_exempt_keys(current_ha))
+            prepared = prepare_permissions(raw['permissions'], registry=registry)
             ha_diff = _diff_permissions(current_ha, prepared)
+            _check_protected_diff(ha_diff)
     return {
         'agent': agent,
         'policy': clean,
@@ -1094,7 +1096,7 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
                 _write_web(conn, agent.get('name') or '', state['web'])
             if state['ha_touched'] and prepared is not None:
                 revoked, created = _write_ha_diff(
-                    conn, agent_id, tx_diff, actor, now, prepared=prepared)
+                    conn, agent_id, tx_diff, actor, now)
             new_version = bump_agent_config_version(agent_id, conn)
             conn.commit()
         except Exception:

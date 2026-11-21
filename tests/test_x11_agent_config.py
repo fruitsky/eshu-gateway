@@ -206,6 +206,42 @@ def test_an_unchanged_protected_paused_row_does_not_block_other_saves(
     assert r.json()['detail']['code'] == 'protected_device'
 
 
+def test_an_exact_suspended_row_is_not_consumed_by_an_earlier_item(
+        auth_client, agent, ha):
+    """CB17: pairing by list order must not turn the exempt copy into a grant."""
+    a.create_allowance('operator', agent['id'], 'Kettle', 'switch',
+                       'turn_off', ['switch.kettle'])
+    a.set_protected_entities('operator', ['switch.kettle'])
+    got = _get(auth_client, agent['id'])
+    suspended = next(p for p in got['home_assistant']['permissions']
+                     if p['entities'] == ['switch.kettle'])
+    assert suspended['suspended_reason'] == 'protected'
+    # The other permission is first in the list and shares the group. With
+    # the old one-pass diff it took the suspended row, and the exact copy
+    # below was inserted as a new live row.
+    lamp = _perm(name='Lamp', entities=['switch.lamp'])
+    document = {'schema_version': 1, 'home_assistant': {
+        'permissions': [lamp, suspended]}}
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent['id'])
+    live = [p for p in after['home_assistant']['permissions']
+            if not p['suspended_at']]
+    assert [p['entities'] for p in live] == [['switch.lamp']]
+    kettle = [p for p in after['home_assistant']['permissions']
+              if p['entities'] == ['switch.kettle']]
+    assert len(kettle) == 1
+    assert kettle[0]['suspended_reason'] == 'protected'
+    # An exact re-submit of the suspended row stays suspended, not refused.
+    only = {'schema_version': 1, 'home_assistant': {
+        'permissions': [kettle[0]]}}
+    r = _put(auth_client, agent['id'], only, after['version'])
+    assert r.status_code == 200, r.text
+    still = _get(auth_client, agent['id'])['home_assistant']['permissions']
+    assert [p['suspended_reason'] for p in still
+            if p['entities'] == ['switch.kettle']] == ['protected']
+
+
 def test_the_ceiling_never_allowed_and_risk_ack_are_enforced(
         auth_client, agent, ha):
     got = _get(auth_client, agent['id'])
