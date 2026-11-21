@@ -23877,3 +23877,22 @@ rows that don't pin the device.**
 Nit: `/api/e2e/commands` puts the repo root first on the server's
 `sys.path`. Load `run.py` by file path with `importlib.util`, or move
 `COMMANDS` into a small module that both import.
+
+### CB17 fixed (`feat/x11-stage5`)
+
+* The `protected_exempt` / `allow_protected` flag is gone. Preparation
+  validates shape but defers the protection check.
+* `_diff_permissions` matches exact signatures in a first pass over every
+  prepared item, then pairs the rest by group in list order. An earlier
+  non-exact item can no longer consume another item's suspended row.
+* Protection is checked after the diff for every `changed` and `added` row,
+  in validation and again inside the apply transaction. `keep` rows are not
+  written, so an exactly unchanged suspended row needs no exemption.
+* Protect-time still suspends device rows that hold the device. It does not
+  suspend label rows; a new or changed label row that would pin a protected
+  device is refused, and the match path still refuses the device.
+* `/api/e2e/commands` loads `scripts/e2e/run.py` by file path with
+  `importlib.util`; it no longer adds the repo root to `sys.path`.
+* UI: the Run commands sentence is **Pick the machines this agent may run
+  commands on.** The agent card no longer shows the browser-local template
+  badge; it keeps status and what the agent can do.

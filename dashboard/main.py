@@ -4528,13 +4528,22 @@ def e2e_commands_endpoint(request: Request):
     """Read-only: the E2E suite's exact command list, so the T8 token form
     cannot drift from `scripts/e2e/run.py COMMANDS`."""
     _check_session(request)
+    import importlib.util
     import sys
     from pathlib import Path
-    root = str(Path(__file__).resolve().parents[1])
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from scripts.e2e import run as e2e_run
-    return {'commands': list(e2e_run.COMMANDS)}
+    path = Path(__file__).resolve().parents[1] / 'scripts' / 'e2e' / 'run.py'
+    spec = importlib.util.spec_from_file_location('eshu_e2e_commands', path)
+    if spec is None or spec.loader is None:
+        raise HTTPException(status_code=500,
+                            detail='Could not load the E2E command list')
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through sys.modules during exec.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return {'commands': list(module.COMMANDS)}
 
 
 @app.get("/api/agents/{agent_id}/activity")

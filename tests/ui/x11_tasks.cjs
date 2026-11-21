@@ -88,7 +88,9 @@ async function noSideScroll(page, where) {
   await page.waitForTimeout(1600);
   const newCard = page.locator('[data-agent-card]', { hasText: name }).first();
   ok(await newCard.count() === 1, 'T1: the new agent is missing after reload');
-  ok(/Household/.test(await newCard.textContent()), 'T1: the template badge is missing');
+  ok(/Active/.test(await newCard.textContent()), 'T1: the status badge is missing');
+  ok(!/Household/.test(await newCard.textContent()),
+     'T1: the template badge is still on the card');
   finishTask('T1');
 
   // T2 — Run commands on machines.
@@ -96,6 +98,11 @@ async function noSideScroll(page, where) {
   await gotoAgents(page);
   await openAgent(page, 'ops-agent'); clicks += 1;
   await tap(page.locator('[data-x11-nav="run"]'));
+  const runText = await page.locator('#x11-sec-run').textContent();
+  ok(/Pick the machines this agent may run commands on\./.test(runText),
+     'T2: the Run commands sentence is missing');
+  ok(!/only SSH setting/.test(runText),
+     'T2: the Run commands section still talks about the tool key');
   await page.locator('[data-machine] [data-ssh-host="192.0.2.11"]').click(); clicks += 1;
   await tap(page.locator('[data-ssh-mode="normal"]'));
   ok(await page.locator('[data-unsaved="ssh"]').isVisible(),
@@ -246,7 +253,7 @@ async function noSideScroll(page, where) {
   await tap(page.locator('button', { hasText: 'All agents' }));
   await page.waitForTimeout(1400);
   const e2eCard = page.locator('[data-agent-card]', { hasText: 'e2e-candidate' }).first();
-  ok(/Test agent/.test(await e2eCard.textContent()), 'T8: the Test agent badge is missing');
+  ok(/Active/.test(await e2eCard.textContent()), 'T8: the status badge is missing');
   ok(/web01/.test(await e2eCard.textContent()), 'T8: the one machine is not on the card');
   finishTask('T8');
 

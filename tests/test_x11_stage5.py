@@ -49,6 +49,13 @@ def test_the_e2e_command_endpoint_is_the_suite_constant(auth_client):
     assert 'printf e2e-window' in r.json()['commands']
 
 
+def test_the_e2e_command_endpoint_does_not_change_sys_path(auth_client):
+    before = list(sys.path)
+    r = auth_client.get('/api/e2e/commands')
+    assert r.status_code == 200, r.text
+    assert sys.path == before
+
+
 def test_t8_setup_passes_the_e2e_preflight(auth_client, monkeypatch):
     register_gateway(GATEWAY, 'web01.example.test', 'v-test')
     _ha()

@@ -616,26 +616,6 @@
     renderAgents();
   }
 
-  function agentTemplateKey(entry) {
-    var id = String(entry.agent.id);
-    try {
-      var map = JSON.parse(window.localStorage.getItem('eshu.x11.agentTemplates') || '{}');
-      if (map[id]) return map[id];
-    } catch (e) { /* private mode */ }
-    var p = entry.agent.policy || {};
-    if (p.test_agent) return 'test';
-    var hosts = ((entry.config || {}).ssh || {}).hosts || [];
-    var tools = ((entry.config || {}).tools || {}).allow || [];
-    var perms = ((entry.config || {}).home_assistant || {}).permissions || [];
-    if (hosts.length) return 'ops';
-    if (tools.length || perms.length) return 'household';
-    return 'empty';
-  }
-  function agentType(entry) {
-    var key = agentTemplateKey(entry);
-    return ({ household: 'Household', ops: 'Ops', test: 'Test agent',
-      observer: 'Observer' })[key] || 'Custom';
-  }
   function pendingForAgent(name) {
     var n = 0;
     (S.pendingRequests || []).forEach(function (r) {
@@ -739,7 +719,7 @@
     return '<a class="x11-agent-card" href="#agent/' + Number(a.id) + '/overview" data-agent-card ' +
       'data-agent-id="' + Number(a.id) + '" aria-label="Open ' + attr(a.name) + '">' +
       '<div class="x11-agent-card-head"><span class="x11-agent-name">' + esc(a.name) + '</span>' +
-      '<span class="x11-agent-status"><span class="badge">' + esc(agentType(entry)) + '</span> ' +
+      '<span class="x11-agent-status">' +
       '<span class="badge' + (a.revoked ? ' badge-denied' : '') + '">' + esc(status) + '</span></span></div>' +
       '<p class="x11-agent-last">' + (last
         ? 'Last: ' + esc(last.text) + ' \u00b7 ' + esc(ago(last.ts))
@@ -3191,8 +3171,7 @@
         m[0] + '\')"><span class="x11-mode-name">' + esc(m[1]) +
         '</span><span class="x11-mode-note">' + esc(m[2]) + '</span></button>';
     }).join('');
-    return '<p class="x11-int-sentence">This is the only SSH setting. Picking a machine adds the ' +
-      '<code>ssh_exec</code> tool to an allowlist agent automatically; removing the last machine removes it.</p>' +
+    return '<p class="x11-int-sentence">Pick the machines this agent may run commands on.</p>' +
       '<div class="x11-machine-tools"><input id="x11-machine-search" type="search" placeholder="Search machines" ' +
       'aria-label="Search machines" value="' + attr(S.machineSearch) + '" oninput="x11MachineSearch(this.value)"></div>' +
       '<label class="x11-any-machine"><input type="checkbox" data-ssh-any' +
@@ -3853,14 +3832,6 @@
       home_assistant: { permissions: [] },
     };
   }
-  function saveTemplateMark(id, key) {
-    try {
-      var raw = window.localStorage.getItem('eshu.x11.agentTemplates') || '{}';
-      var map = JSON.parse(raw);
-      map[String(id)] = key;
-      window.localStorage.setItem('eshu.x11.agentTemplates', JSON.stringify(map));
-    } catch (e) { /* a private window may refuse localStorage */ }
-  }
   function applyConfigDocument(id, document) {
     return api('/api/agents/' + Number(id) + '/config').then(function (cfg) {
       return api('/api/agents/' + Number(id) + '/config', {
@@ -3894,7 +3865,6 @@
       })
       .then(function () {
         st.applied = true;
-        saveTemplateMark(st.id, st.template);
         st.busy = false;
         st.step = 5;
         renderNewAgent();

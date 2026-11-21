@@ -38,7 +38,8 @@ apply. `Test agent` is only a head start; T8 finishes it.
 One section owns SSH: the machine list, the search, **Any machine**, and the
 three modes. There is no second tool switch. Picking a machine adds
 `ssh_exec` to an allowlist agent in the same save; removing the last machine
-removes it. The three modes are **Follow each machine's rules** (normal),
+removes it. The page says **Pick the machines this agent may run commands
+on.** The three modes are **Follow each machine's rules** (normal),
 **Always ask me** (approval) and **Read-only**.
 
 ## T3 — Use an integration
