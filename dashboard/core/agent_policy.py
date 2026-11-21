@@ -36,6 +36,16 @@ def tool_key(integration_name: str, tool_name: str) -> str:
     return f"{safe_ident(integration_name).lower()}_{tool_name}"
 
 
+def reserved_ssh_integration_name(name: str) -> bool:
+    """CB19: the `ssh` namespace would make a tool key `ssh_exec`.
+
+    `ssh_exec` is derived from SSH hosts, so an integration named `ssh` with
+    a tool named `exec` would collide with it. Reserve the namespace instead
+    of trying to distinguish the two.
+    """
+    return safe_ident(name).lower() == 'ssh'
+
+
 def _as_list(value):
     if value is None:
         return []

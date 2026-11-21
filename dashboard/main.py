@@ -138,7 +138,7 @@ from core import allowances
 from core import agent_config
 from core import ha_devices
 from db.policies import get_meta, set_meta
-from core.agent_policy import evaluate_call, safe_ident
+from core.agent_policy import evaluate_call, safe_ident, reserved_ssh_integration_name
 from core.session_guard import (
     require_sessions_enabled, require_sessions_for_gateway, session_problem,
 )
@@ -5002,6 +5002,11 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
+    if reserved_ssh_integration_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="The 'ssh' integration name is reserved: its tools would "
+                   "collide with the ssh_exec tool key")
     if get_integration(name):
         raise HTTPException(status_code=400, detail="Integration already exists")
     if payload.auth_type not in ALLOWED_AUTH_TYPES:
@@ -5047,6 +5052,11 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     _check_session(request)
     if not get_integration(name):
         raise HTTPException(status_code=404, detail="Integration not found")
+    if reserved_ssh_integration_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="The 'ssh' integration name is reserved and cannot be "
+                   "edited; delete it and use a different name")
     data = payload.model_dump(exclude_none=True)
     if 'auth_type' in data and data['auth_type'] not in ALLOWED_AUTH_TYPES:
         raise HTTPException(status_code=400, detail="Invalid auth_type")
@@ -5217,6 +5227,11 @@ def create_tool_endpoint(name: str, payload: ToolPayload, request: Request):
     integration = get_integration(name)
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
+    if reserved_ssh_integration_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="The 'ssh' integration name is reserved: its tools would "
+                   "collide with the ssh_exec tool key")
     tool_id = create_tool(integration['id'], payload.name, payload.description, payload.method,
                           payload.path_template, payload.params, payload.example, payload.read_only,
                           principal_allow=payload.principal_allow)

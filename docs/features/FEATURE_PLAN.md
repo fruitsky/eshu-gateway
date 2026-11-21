@@ -23800,3 +23800,18 @@ Nits:
    reorder fails closed.
 2. **`risky` depends on `device_class`.** Treat the `lock` domain as
    risky in its own right, since most locks carry no device class.
+
+### CB18 and CB19 fixed (`fix/ssh-exec-access`)
+
+* **CB18.** One startup step (`migrate_ssh_hosts_without_exec`, guarded by
+  `ssh_hosts_without_exec_cleared_v1`) clears the host list of every
+  allowlist agent that has hosts but no `ssh_exec`, bumps its config
+  version, and writes one `agent_ssh_hosts_cleared` row naming the agent and
+  removed hosts. Nobody gains SSH. The S5 preview now names an `ssh_exec`
+  change from any section (`will be able to run commands on …` / `will no
+  longer be able to run commands`), not only a host edit.
+* **CB19.** The `ssh` integration namespace is reserved. Creating a
+  `ssh` integration, editing one, or adding a tool to one is refused. A
+  one-time startup step (`ssh_integration_namespace_reserved_v1`) disables
+  any pre-existing row, disables its tools, and audits
+  `integration_ssh_namespace_reserved`.

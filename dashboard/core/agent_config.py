@@ -19,7 +19,7 @@ from core.web_fetch_policy import validate_policy as validate_web_policy
 from db.agent_policies import (
     get_agent_config_version, bump_agent_config_version, get_agent_policy,
     validate_policy, _validate_test_agent_policy, write_policy_row,
-    sync_ssh_tool,
+    sync_ssh_tool, SSH_EXEC_TOOL,
 )
 from db.agent_tokens import get_agent
 from db.web_fetch import get_web_fetch_policy
@@ -771,9 +771,10 @@ def _summary_sections(agent_name, policy_info, web_info, ha_diff,
         if ssh.get('changed'):
             hosts = list(ssh['hosts'] or [])
             if not hosts:
-                bits.append('SSH off')
+                bits.append('will no longer be able to run commands')
             else:
-                bits.append('can run commands on ' + ssh_host_words(hosts))
+                bits.append('will be able to run commands on '
+                            + ssh_host_words(hosts))
         if bits:
             changed.append({'section': 'tools', 'summary': '; '.join(bits)})
     if web_info and web_info.get('changed'):
@@ -963,8 +964,12 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
         }
         ssh_old_mode = current_policy.get('ssh_mode')
         ssh_old_hosts = current_policy.get('ssh_hosts_allow') or []
+        ssh_exec_changed = (
+            (SSH_EXEC_TOOL in (policy.get('tools') or []))
+            != (SSH_EXEC_TOOL in (current_policy.get('tools') or [])))
         ssh_changed = (policy['ssh_mode'] != ssh_old_mode
-                       or list(policy['ssh_hosts_allow']) != list(ssh_old_hosts))
+                       or list(policy['ssh_hosts_allow']) != list(ssh_old_hosts)
+                       or ssh_exec_changed)
         policy_info = {
             'tools': tools_info,
             'ssh': {'changed': ssh_changed, 'mode': policy['ssh_mode'],

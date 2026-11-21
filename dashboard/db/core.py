@@ -87,4 +87,8 @@ def init_db():
     conn.commit()
     conn.close()
     from db.audit import migrate_window_token_details
+    from db.agent_policies import migrate_ssh_hosts_without_exec
+    from db.integrations import migrate_reserved_ssh_integration
     migrate_window_token_details()
+    migrate_ssh_hosts_without_exec()
+    migrate_reserved_ssh_integration()

@@ -120,7 +120,7 @@ def test_ssh_hosts_add_and_remove_ssh_exec_in_the_same_s5_write(
     preview = _put(auth_client, agent['id'], document, got['version'],
                    preview=True)
     assert preview.status_code == 200, preview.text
-    assert 'can run commands on web01.example.test (192.0.2.10)' in preview.text
+    assert 'will be able to run commands on web01.example.test (192.0.2.10)' in preview.text
     r = _put(auth_client, agent['id'], document, got['version'])
     assert r.status_code == 200, r.text
     after = _get(auth_client, agent['id'])

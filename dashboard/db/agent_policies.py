@@ -21,6 +21,10 @@ DEFAULT_RATE_LIMIT = 0
 SSH_MODES = ('read_only', 'approval', 'normal')
 DEFAULT_SSH_MODE = 'approval'
 SSH_EXEC_TOOL = 'ssh_exec'
+# CB18: one startup step keeps today's effective access. An allowlist agent
+# with hosts but no `ssh_exec` cannot run SSH; after this change a later save
+# would derive the key and grant it. Clear those hosts once instead.
+SSH_HOSTS_CLEARED_KEY = 'ssh_hosts_without_exec_cleared_v1'
 
 
 def init_agent_policies_tables(cursor):
@@ -350,6 +354,65 @@ def sync_ssh_tool(clean):
         tools.discard(SSH_EXEC_TOOL)
     clean['tools'] = sorted(tools)
     return clean
+
+
+def migrate_ssh_hosts_without_exec():
+    """CB18: clear hosts on allowlist agents that never had `ssh_exec`.
+
+    Before SSH became one setting, a host list only meant anything together
+    with the `ssh_exec` tool key. Such an agent cannot run SSH today; deriving
+    the key on its next save would grant it silently. One startup step clears
+    those hosts and writes one audit row per agent. Nobody gains access.
+
+    Guarded by a meta flag, so a second startup does nothing. The update, the
+    version bump, the audit rows and the flag commit together.
+    """
+    with db_conn() as conn:
+        if conn.execute('SELECT 1 FROM meta WHERE key = ?',
+                        (SSH_HOSTS_CLEARED_KEY,)).fetchone():
+            return 0
+        cleared = 0
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                'SELECT p.agent_id, p.tools_json, p.ssh_hosts_allow_json, '
+                't.name FROM agent_policies p '
+                'LEFT JOIN agent_tokens t ON t.id = p.agent_id '
+                "WHERE p.tools_mode = 'allowlist'").fetchall()
+            now = int(time.time())
+            for row in rows:
+                hosts = [str(h) for h in
+                         _load_json(row['ssh_hosts_allow_json'], [])
+                         if str(h).strip()]
+                tools = _load_json(row['tools_json'], [])
+                if not hosts or SSH_EXEC_TOOL in tools:
+                    continue
+                agent_id = int(row['agent_id'])
+                conn.execute(
+                    'UPDATE agent_policies SET ssh_hosts_allow_json = ?, '
+                    'updated_at = ? WHERE agent_id = ?',
+                    ('[]', now, agent_id))
+                bump_agent_config_version(agent_id, conn)
+                conn.execute(
+                    'INSERT INTO audit_log (event_type, timestamp, gateway_ip, '
+                    'hostname, details, actor) VALUES (?, ?, ?, ?, ?, ?)',
+                    ('agent_ssh_hosts_cleared', now, None, None,
+                     "agent #%d '%s': SSH hosts cleared: they had no "
+                     'ssh_exec; re-pick machines to grant SSH (removed: %s)'
+                     % (agent_id, row['name'] or '', ', '.join(hosts)),
+                     'system'))
+                cleared += 1
+            conn.execute(
+                'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+                (SSH_HOSTS_CLEARED_KEY, '1'))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    return cleared
 
 
 def agent_has_activity(agent_id: int) -> bool:

@@ -2,7 +2,13 @@ import json
 import time
 from db.core import db_conn
 from core.agent_context import current_session_source
+from core.agent_policy import reserved_ssh_integration_name
 from core.secret_scrub import scrub_payload, secret_hashes
+
+# CB19: an integration named `ssh` can make a tool key `ssh_exec`, the same
+# key SSH hosts derive. The API refuses the name; this one-time step disables
+# any row that already exists rather than leaving a live collision.
+RESERVED_SSH_NAMESPACE_KEY = 'ssh_integration_namespace_reserved_v1'
 
 
 def init_integrations_tables(cursor):
@@ -993,6 +999,54 @@ def purge_old_integration_calls_by_retention(now_ts: int) -> int:
         n2 = cursor.rowcount
         conn.commit()
         return n1 + n2
+
+
+def migrate_reserved_ssh_integration():
+    """CB19: disable any existing integration whose namespace is `ssh`.
+
+    A row named `ssh` can expose a tool key `ssh_exec`, which is now reserved
+    for the host-derived SSH tool. The API refuses to create or edit such a
+    row; this one-time startup step disables a row that predates the check
+    and audits it. Disabling hides its tools from the shared MCP endpoint.
+    """
+    with db_conn() as conn:
+        if conn.execute('SELECT 1 FROM meta WHERE key = ?',
+                        (RESERVED_SSH_NAMESPACE_KEY,)).fetchone():
+            return 0
+        disabled = 0
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                'SELECT id, name FROM integrations').fetchall()
+            now = int(time.time())
+            for row in rows:
+                if not reserved_ssh_integration_name(row['name']):
+                    continue
+                conn.execute(
+                    'UPDATE integrations SET enabled = 0 WHERE id = ?',
+                    (int(row['id']),))
+                conn.execute(
+                    'UPDATE integration_tools SET enabled = 0 '
+                    'WHERE integration_id = ?', (int(row['id']),))
+                conn.execute(
+                    'INSERT INTO audit_log (event_type, timestamp, gateway_ip, '
+                    'hostname, details, actor) VALUES (?, ?, ?, ?, ?, ?)',
+                    ('integration_ssh_namespace_reserved', now, None, None,
+                     "integration '%s' disabled: the ssh namespace is reserved "
+                     'for the host-derived ssh_exec tool key' % row['name'],
+                     'system'))
+                disabled += 1
+            conn.execute(
+                'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+                (RESERVED_SSH_NAMESPACE_KEY, '1'))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    return disabled
 
 
 def mask_sensitive_args(payload: dict, tool: dict) -> dict:
