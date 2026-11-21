@@ -21913,6 +21913,60 @@ was run.
   output modes share one `Runner.run()` that returns rows, so the next fix
   cannot miss one of them.
 
+### Security: `fix/ssh-exec-access` (c72652a)
+
+Read as code text only; nothing was run.
+
+**Approved once CB18 is fixed. CB19 should come with it.**
+
+**What holds.**
+
+* The test-agent allowlist gains only the exact key `ssh_exec`. The rest
+  of BY4 is unchanged: a single IP host, an allowlist, and no `ungated`.
+* `sync_ssh_tool` runs inside both writers, `set_agent_policy` and S5's
+  `_validate_config`, before the test-agent check and before the row is
+  written. The allowlist and the hosts therefore move in one write, and
+  the hash S5 previews covers the derived key.
+* Removing the last host removes the key. An all-tools agent is left
+  alone.
+* Both audit rows record `ssh_exec` on/off.
+* The SSH tile now goes through `static_tool_decision`, and "no hosts"
+  means none.
+* The E2E preflight requires `ssh_exec`.
+* `web_fetch_url` is granted only when the policy is enabled and lists a
+  site. The tool's `principal_allow` still follows enabled callers, so
+  nothing is widened.
+
+**CB18 (must). Existing agents gain SSH on their next unrelated save.**
+
+* Before this change, SSH needed both a listed host and `ssh_exec` in
+  the allowlist.
+* An allowlist agent that has hosts but no `ssh_exec` can't run SSH
+  today. After this change, any later save adds `ssh_exec`, even a save
+  that only touches web or HA.
+* The S5 preview mentions SSH only when the hosts changed, so the grant
+  appears in the audit row but not on the preview the operator
+  confirms.
+* Fix: a one-time startup migration that keeps today's effective access.
+  * For each allowlist agent with hosts but no `ssh_exec`, clear
+    `ssh_hosts_allow`, bump the config version, and write one audit row
+    naming the agent and the hosts removed.
+  * After that, hosts imply `ssh_exec` everywhere and no save can grant
+    it silently.
+  * Also have the preview name `ssh_exec` whenever the derived key
+    differs from the stored one, not only when the hosts changed.
+
+**CB19 (should). Reserve the `ssh_exec` key.**
+
+* An integration whose namespace is `ssh` and which has a tool named
+  `exec` has the policy key `ssh_exec`, and the same name on the shared
+  MCP endpoint.
+* That key is now granted automatically to every allowlist agent with
+  hosts, and to test agents.
+* Fix: refuse an integration name whose `safe_ident` namespace is `ssh`,
+  or refuse any integration tool whose `tool_key` equals `ssh_exec`.
+* Check existing rows once at startup.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
