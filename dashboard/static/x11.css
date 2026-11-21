@@ -74,11 +74,6 @@
 #x11-root .x11-card:hover { border-color: var(--accent-line); background: var(--bg-hover); }
 #x11-root .x11-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 #x11-root .x11-card-name { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
-#x11-root .x11-badge {
-  display: inline-block; border: 1px solid var(--rule); border-radius: 999px;
-  padding: 1px 8px; font-size: var(--text-micro); color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.06em;
-}
 #x11-root .x11-card-summary { margin-top: 10px; color: var(--text-main); font-size: var(--text-sm); overflow-wrap: anywhere; }
 #x11-root .x11-card-meta { margin-top: 8px; color: var(--text-muted); font-size: var(--text-xs); }
 #x11-root .x11-card-paused { margin-top: 6px; color: var(--accent); font-size: var(--text-xs); }
@@ -259,8 +254,9 @@
 }
 #x11-new-modal.hidden { display: none; }
 #x11-new-modal .x11-new-card-modal {
-  width: min(480px, 100%); background: var(--bg-surface);
-  border: 1px solid var(--rule); border-radius: var(--radius-lg); padding: 20px;
+  width: min(620px, 100%); max-height: 90vh; overflow: auto;
+  background: var(--bg-surface); border: 1px solid var(--rule);
+  padding: 20px;
 }
 #x11-new-modal h2 { font-family: var(--serif); font-size: 26px; font-weight: 400; margin-bottom: 8px; }
 #x11-new-modal .x11-token-once { margin-top: 12px; padding: 10px; border: 1px solid var(--accent-line); background: var(--accent-wash); border-radius: var(--radius); word-break: break-all; font-family: 'JetBrains Mono', monospace; font-size: var(--text-xs); }
@@ -658,3 +654,183 @@
   display: flex; justify-content: flex-end; margin-top: 22px;
   padding-top: 12px; border-top: 1px solid var(--rule-weak);
 }
+
+
+/* ── X11 Stage 5: task-first sections. Square, 1px, Eshu's own controls. ── */
+#x11-root, #x11-root *, #x11-preview-modal *, #x11-new-modal * { border-radius: 0 !important; }
+#x11-root [hidden], #x11-preview-modal [hidden], #x11-new-modal [hidden] { display: none !important; }
+#x11-root .badge,
+#x11-root .badge * { border-radius: 0 !important; }
+#x11-root .x11-homewide-banner {
+  border: 1px solid var(--accent-line); background: var(--accent-wash);
+  color: var(--accent); padding: 10px 12px; margin: 0 0 14px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+#x11-root .x11-machine-tools { margin: 10px 0; }
+#x11-root .x11-machine-tools input { width: 100%; max-width: 460px; }
+#x11-root .x11-machine-list,
+#x11-root .x11-pick-list { display: grid; gap: 8px; margin: 10px 0 16px; }
+#x11-root .x11-machine,
+#x11-root .x11-pick {
+  display: flex; align-items: center; gap: 10px; min-height: 46px;
+  padding: 9px 11px; border: 1px solid var(--rule-weak);
+  background: var(--bg-surface); cursor: pointer;
+}
+#x11-root .x11-machine:hover,
+#x11-root .x11-pick:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-machine-text,
+#x11-root .x11-pick > span { display: flex; flex-direction: column; min-width: 0; }
+#x11-root .x11-machine-name,
+#x11-root .x11-pick b { font-size: var(--text-sm); overflow-wrap: anywhere; }
+#x11-root .x11-machine-ip,
+#x11-root .x11-pick-note {
+  font-family: 'JetBrains Mono', monospace; font-size: var(--text-micro);
+  color: var(--text-muted); overflow-wrap: anywhere;
+}
+#x11-root .x11-any-machine {
+  display: flex; align-items: center; gap: 8px; min-height: 42px;
+  border-top: 1px solid var(--rule-weak); border-bottom: 1px solid var(--rule-weak);
+  margin-bottom: 4px; font-size: var(--text-sm);
+}
+#x11-root .x11-mode-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+#x11-root .x11-mode {
+  text-align: left; padding: 12px; border: 1px solid var(--rule);
+  background: transparent; color: var(--text-main); min-height: 84px;
+}
+#x11-root .x11-mode:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-mode[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
+#x11-root .x11-mode-name { display: block; font-size: var(--text-sm); font-weight: 600; }
+#x11-root .x11-mode-note { display: block; color: var(--text-muted); font-size: var(--text-xs); margin-top: 4px; line-height: 1.45; }
+#x11-root .x11-questions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 18px; }
+#x11-root .x11-question {
+  text-align: left; padding: 11px 12px; border: 1px solid var(--rule);
+  background: transparent; color: var(--text-main); min-height: 64px;
+}
+#x11-root .x11-question:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-question[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
+#x11-root .x11-question-title { display: block; font-size: var(--text-sm); font-weight: 600; }
+#x11-root .x11-question-note { display: block; color: var(--text-muted); font-size: var(--text-xs); margin-top: 3px; }
+#x11-root .x11-tool-shortcuts { display: grid; gap: 8px; margin: 18px 0 4px; }
+#x11-root .x11-shortcut {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left; padding: 11px 12px; border: 1px solid var(--rule-weak);
+  background: var(--bg-surface); color: var(--text-main); min-height: 52px;
+}
+#x11-root .x11-shortcut:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-shortcut b { display: block; font-size: var(--text-sm); }
+#x11-root .x11-shortcut-note { display: block; color: var(--text-muted); font-size: var(--text-xs); margin-top: 2px; }
+#x11-root .x11-switch-line {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px 0;
+  border-top: 1px solid var(--rule-weak); border-bottom: 1px solid var(--rule-weak);
+  margin-bottom: 14px; font-size: var(--text-sm);
+}
+#x11-root .x11-switch-line > span { display: flex; flex-direction: column; gap: 3px; }
+#x11-root .x11-switch-note { color: var(--text-muted); font-size: var(--text-xs); }
+#x11-root .x11-field { display: grid; gap: 6px; margin: 12px 0; max-width: 100%; }
+#x11-root .x11-field > label { color: var(--text-muted); font-size: var(--text-xs); }
+#x11-root .x11-flex { flex: 1 1 auto; }
+#x11-root .x11-wizard-head { margin-bottom: 14px; }
+#x11-root .x11-wizard-step {
+  font-family: 'JetBrains Mono', monospace; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--text-micro);
+}
+#x11-root .x11-wizard-head h2 { font-family: var(--serif); font-size: 30px; font-weight: 400; margin-top: 2px; }
+#x11-root .x11-template-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+#x11-root .x11-template {
+  text-align: left; padding: 11px 12px; border: 1px solid var(--rule);
+  background: transparent; color: var(--text-main); min-height: 76px;
+}
+#x11-root .x11-template:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-template[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
+#x11-root .x11-template-name { display: block; font-weight: 600; font-size: var(--text-sm); }
+#x11-root .x11-template-note { display: block; color: var(--text-muted); font-size: var(--text-xs); margin-top: 4px; line-height: 1.45; }
+#x11-root .x11-wizard-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule-weak); }
+#x11-root .x11-review { font-size: var(--text-md); line-height: 1.55; border-left: 2px solid var(--accent); padding-left: 14px; margin: 12px 0 18px; max-width: 80ch; }
+#x11-root .x11-connect { border: 1px solid var(--rule-weak); padding: 10px 12px; margin-top: 10px; }
+#x11-root .x11-connect p { font-size: var(--text-xs); margin: 4px 0; overflow-wrap: anywhere; }
+#x11-root .x11-test-entry {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--rule-weak); background: var(--bg-surface);
+  padding: 12px 14px; margin: 18px 0;
+}
+#x11-root .x11-test-entry h3 { font-size: var(--text-md); }
+#x11-root .x11-test-setup {
+  border: 1px solid var(--accent-line); background: var(--accent-wash);
+  padding: 14px; margin: 12px 0 18px;
+}
+#x11-root .x11-test-setup h3 { font-family: var(--serif); font-size: 24px; font-weight: 400; margin-bottom: 4px; }
+#x11-root .x11-change-list { margin: 12px 0; }
+#x11-root .x11-change-list h4 { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); margin-bottom: 4px; }
+#x11-root .x11-change-list ul { margin-left: 18px; font-size: var(--text-sm); line-height: 1.6; }
+#x11-root .x11-token-once { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  #x11-root .x11-mode-list,
+  #x11-root .x11-questions,
+  #x11-root .x11-template-list { grid-template-columns: minmax(0, 1fr); }
+  #x11-root .x11-mode,
+  #x11-root .x11-question,
+  #x11-root .x11-template { min-height: 44px; }
+  #x11-root .x11-test-entry { align-items: flex-start; }
+}
+
+#x11-root .x11-not-saved {
+  display: inline-block; margin-left: 10px; padding: 1px 7px;
+  border: 1px solid var(--accent); color: var(--accent);
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.06em; vertical-align: 3px;
+}
+#x11-root .x11-notice[data-kind="success"] { border-color: var(--state-approved); color: var(--state-approved); }
+#x11-preview-modal h2[hidden] { display: none; }
+#x11-root .x11-savebar { position: fixed; }
+
+#x11-root .x11-counters {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px; margin: 0 0 18px;
+}
+#x11-root .x11-counter {
+  display: flex; align-items: baseline; gap: 10px; text-align: left;
+  padding: 11px 13px; border: 1px solid var(--rule-weak);
+  background: var(--bg-surface); color: var(--text-main); min-height: 48px;
+}
+#x11-root .x11-counter:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-counter b { font-family: var(--serif); font-size: 28px; font-weight: 400; color: var(--accent); }
+#x11-root .x11-counter span { font-size: var(--text-sm); color: var(--text-muted); }
+#x11-root .x11-agent-card {
+  display: flex; flex-direction: column; gap: 7px; min-width: 0;
+  padding: 13px 14px; border: 1px solid var(--rule-weak);
+  background: var(--bg-surface); color: var(--text-main); text-decoration: none;
+}
+#x11-root .x11-agent-card:hover { border-color: var(--accent-line); background: var(--bg-hover); }
+#x11-root .x11-agent-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+#x11-root .x11-agent-name { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
+#x11-root .x11-agent-status { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+#x11-root .x11-agent-last { color: var(--text-main); font-size: var(--text-xs); }
+#x11-root .x11-agent-machines { color: var(--text-muted); font-size: var(--text-xs); }
+#x11-root .x11-agent-machines b { color: var(--text-main); font-weight: 500; }
+#x11-root .x11-agent-needs { color: var(--accent); font-size: var(--text-xs); }
+#x11-root .x11-mini-bars { display: grid; gap: 4px; margin: 2px 0; }
+#x11-root .x11-mini { display: grid; grid-template-columns: minmax(76px, 0.8fr) minmax(50px, 1.2fr) 20px; gap: 7px; align-items: center; }
+#x11-root .x11-mini-name { font-size: var(--text-micro); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#x11-root .x11-mini .x11-accessbar { height: 7px; margin: 0; }
+#x11-root .x11-mini-count { font-family: 'JetBrains Mono', monospace; font-size: var(--text-micro); color: var(--text-muted); text-align: right; }
+@media (max-width: 1100px) {
+  #x11-root .x11-counters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  #x11-root .x11-counters { grid-template-columns: minmax(0, 1fr); }
+  #x11-root .x11-counter { min-height: 44px; }
+  #x11-root .x11-agent-status { justify-content: flex-start; }
+}
+
+#x11-leave-modal {
+  position: fixed; inset: 0; z-index: 95; display: flex;
+  align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0, 0, 0, 0.66);
+}
+#x11-leave-modal.hidden { display: none; }
+#x11-leave-modal .x11-leave-card {
+  width: min(440px, 100%); border: 1px solid var(--accent-line);
+  background: var(--bg-surface); padding: 20px;
+}
+#x11-leave-modal h2 { font-family: var(--serif); font-size: 28px; font-weight: 400; margin-bottom: 6px; }

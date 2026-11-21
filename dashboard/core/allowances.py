@@ -1054,7 +1054,8 @@ CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
 
 def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
                         expires_at=0, risk_ack=False, registry=None,
-                        return_risk=False, source_label=''):
+                        return_risk=False, source_label='',
+                        allow_protected=False):
     """Every save/apply check, in one place, without writing anything.
 
     Returns `(entities, pins)`, or `(entities, pins, risk)` when
@@ -1093,7 +1094,7 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
         pins.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
     # S3/CB5: refuse on the entity id or the registry id captured at protect
     # time, so a renamed protected entity cannot be granted under its new name.
-    hits = _protected_hits(pins=pins, entities=entities)
+    hits = [] if allow_protected else _protected_hits(pins=pins, entities=entities)
     if hits:
         first = hits[0]['entity_id']
         if source_label:
@@ -1141,7 +1142,8 @@ def _recheck_conn(conn, prepared):
             raise AllowanceError(
                 400, 'The ceiling no longer allows %s.%s; reload and retry.'
                      % (domain, service), {'code': 'ceiling_changed'})
-        hits = _protected_hits(pins=pins, conn=conn)
+        hits = ([] if item.get('protected_exempt') else
+                _protected_hits(pins=pins, conn=conn))
         if hits:
             first = hits[0]['entity_id']
             label = item.get('label_id') or item.get('source_label') or ''

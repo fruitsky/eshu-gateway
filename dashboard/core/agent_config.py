@@ -151,7 +151,7 @@ def _permission_from_row(row):
     return _permission_signature(row)
 
 
-def _normalise_permission(raw, index, registry):
+def _normalise_permission(raw, index, registry, protected_exempt=None):
     where = 'permissions[%d]' % index
     if not isinstance(raw, dict):
         _error(400, '%s must be an object.' % where, 'invalid_permission')
@@ -190,10 +190,16 @@ def _normalise_permission(raw, index, registry):
         if not isinstance(entities, list):
             _error(400, '%s.entities must be a list.' % where,
                    'invalid_permission')
+    provisional = {'domain': domain, 'service': service,
+                   'label_id': label, 'entities': entities,
+                   'rate_per_hour': rate, 'window': window,
+                   'expires_at': expires_at}
+    exempt = bool(protected_exempt and
+                  _permission_exempt_key(provisional) in protected_exempt)
     entities, pins, risk = _allowances._validate_allowance(
         domain, service, entities, rate_per_hour=rate, window=window,
         expires_at=expires_at, risk_ack=True, registry=registry,
-        return_risk=True, source_label=label)
+        return_risk=True, source_label=label, allow_protected=exempt)
     item = {
         'name': str(raw.get('name') or '')[:80],
         'domain': domain,
@@ -206,6 +212,7 @@ def _normalise_permission(raw, index, registry):
         '_provided': provided,
         'pins': pins,
         'risk': risk,
+        'protected_exempt': exempt,
     }
     if not item['name']:
         row = _allowances.catalogue_row(_allowances.INTEGRATION,
@@ -215,14 +222,32 @@ def _normalise_permission(raw, index, registry):
     return item
 
 
-def prepare_permissions(raw_permissions, registry=None):
+def _protected_exempt_keys(rows):
+    """Keys of rows already paused because protecting them was refused.
+
+    An S5 save that leaves such a row exactly as it is may proceed; the row
+    stays suspended. A changed entity set is not exempt, so protection still
+    refuses a new grant."""
+    out = set()
+    for row in rows or []:
+        if (row.get('suspended_reason') or '') != 'protected':
+            continue
+        out.add(_permission_signature(row))
+    return out
+
+
+def _permission_exempt_key(item):
+    return _permission_signature(item)
+
+
+def prepare_permissions(raw_permissions, registry=None, protected_exempt=None):
     if not isinstance(raw_permissions, list):
         _error(400, 'permissions must be a list.', 'invalid_permission')
     if len(raw_permissions) > 64:
         _error(400, 'At most 64 permissions are allowed.', 'invalid_permission')
     if registry is None:
         registry = _allowances._ha_registry()
-    prepared = [_normalise_permission(raw, i, registry)
+    prepared = [_normalise_permission(raw, i, registry, protected_exempt)
                 for i, raw in enumerate(raw_permissions)]
     # Two rows that match the same call make the matcher ambiguous. Refuse
     # duplicates and overlaps here, before anything is written.
@@ -576,8 +601,10 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
     agent = _agent_or_404(agent_id)
     current_version = _check_version(agent_id, version)
     registry = _allowances._ha_registry()
-    prepared = prepare_permissions(permissions, registry=registry)
     current = _current_ha_rows(agent_id)
+    prepared = prepare_permissions(
+        permissions, registry=registry,
+        protected_exempt=_protected_exempt_keys(current))
     diff = _diff_permissions(current, prepared)
     names = _name_map(prepared + current)
     risks = _risk_items(prepared)
@@ -873,8 +900,11 @@ def _validate_config(agent_id, document, version):
             ha_touched = False
         else:
             registry = _allowances._ha_registry()
-            prepared = prepare_permissions(raw['permissions'], registry=registry)
-            ha_diff = _diff_permissions(_current_ha_rows(agent_id), prepared)
+            current_ha = _current_ha_rows(agent_id)
+            prepared = prepare_permissions(
+                raw['permissions'], registry=registry,
+                protected_exempt=_protected_exempt_keys(current_ha))
+            ha_diff = _diff_permissions(current_ha, prepared)
     return {
         'agent': agent,
         'policy': clean,

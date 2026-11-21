@@ -1,11 +1,10 @@
-/* X11 Stage 3/4 — Agents, the integration-first Tools pages and the rules for all agents.
+/* X11 Stage 5 — the operator's tasks, not the database.
  *
- * Every save is Check -> preview -> Apply. The preview is the server's own
- * plain-words diff, and Apply sends its preview_hash. risk_ack / resume_ack
- * are sent only when the preview asked, and only from an explicit checkbox.
- *
- * All state here is operator-side; no agent token is ever put in this file,
- * in a log line or in an audit row.
+ * The agent page is Overview, Run commands, Tools, Websites and Activity.
+ * Home Assistant owns the Home-wide rules; the Agents page has no rules tab.
+ * Every save still goes through the existing S2/S5/policy/allowance APIs with
+ * preview_hash, risk_ack and resume_ack; a template only pre-fills the normal
+ * create + S5 apply.
  */
 (function () {
   'use strict';
@@ -58,8 +57,45 @@
     editingPermission: null,
     intJsonOpen: false,
     toolJsonOpen: false,
+    machineSearch: '',
+    homewideBack: '',
+    newAgent: null,
+    testSetup: null,
+    confirmLeaveOpen: false,
+    savedNotice: null,
   };
-  var HA_TABS = ['tools', 'devices', 'runs', 'files'];
+  var HA_TABS = ['tools', 'devices', 'runs', 'files', 'homewide'];
+  var SECTION_LABELS = {
+    overview: 'Overview', run: 'Run commands', tools: 'Tools',
+    websites: 'Websites', activity: 'Activity', json: 'JSON',
+  };
+  var TEMPLATES = {
+    household: {
+      label: 'Household helper',
+      blurb: 'Reads Home Assistant, asks before it changes a device.',
+      integrations: 'ha', ssh: false, writes: 'ask',
+    },
+    ops: {
+      label: 'Ops assistant',
+      blurb: 'Reads every integration, asks before changes, and can run commands on the machines you pick.',
+      integrations: 'all', ssh: true, writes: 'ask',
+    },
+    observer: {
+      label: 'Observer',
+      blurb: 'Reads only. No changes, and commands are read-only if you allow them.',
+      integrations: 'all', ssh: true, writes: 'none',
+    },
+    test: {
+      label: 'Test agent',
+      blurb: 'A narrow agent for the E2E suite. Finish it with Use automated testing on its Overview.',
+      integrations: 'ha', ssh: false, writes: 'ask', test: true,
+    },
+    empty: {
+      label: 'Start empty',
+      blurb: 'No tools, no machines. Add what it needs later.',
+      integrations: 'none', ssh: false, writes: 'none',
+    },
+  };
   window.x11State = S;
 
   function el(id) { return document.getElementById(id); }
@@ -105,7 +141,7 @@
 
   function ago(ts) {
     if (!ts) return 'never';
-    if (window.formatAgo) return window.formatAgo(Math.max(0, Math.floor(Date.now() / 1000) - ts)) + ' ago';
+    if (window.formatAgo) return window.formatAgo(Math.max(0, Math.floor(Date.now() / 1000) - ts));
     return new Date(ts * 1000).toLocaleString();
   }
   function when(ts) {
@@ -122,6 +158,22 @@
     };
   }
   function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+  // The one-setting rule is mirrored in the draft so the Check preview and
+  // the server agree: machines imply ssh_exec; enabled sites imply
+  // web_fetch_url. Only allowlist agents need the keys.
+  function syncDraftTools() {
+    if (!S.draft || !S.draft.tools || (S.draft.tools.mode || 'all') !== 'allowlist') return;
+    var tools = S.draft.tools;
+    var allow = (tools.allow || []).filter(function (n) {
+      return n !== 'ssh_exec' && n !== 'web_fetch_url';
+    });
+    if ((S.draft.ssh.hosts || []).length) allow.push('ssh_exec');
+    if (S.draft.websites.enabled && (S.draft.websites.allow || []).length) {
+      allow.push('web_fetch_url');
+    }
+    tools.allow = Array.from(new Set(allow)).sort();
+  }
 
   function toolList(integrations) {
     var out = [];
@@ -318,8 +370,7 @@
     if (c.depends) parts.push(c.depends + ' depend on the call');
     if (c.frozen) parts.push(c.frozen + ' frozen');
     parts = parts.concat(deviceSummaryFor(cfg));
-    parts.push(sshText(cfg) === 'off' ? 'No machines'
-      : 'Run commands on: ' + sshText(cfg));
+    parts.push(sshText(cfg) === 'off' ? 'No machines' : 'Run commands on: ' + sshText(cfg));
     return parts.join(' \u00b7 ');
   }
 
@@ -425,9 +476,12 @@
     return null;
   }
 
-  function head(title, sub, jsonKey) {
+  function notSaved(key) {
+    return key ? '<span class="x11-not-saved" data-unsaved="' + attr(key) + '" hidden>Not saved</span>' : '';
+  }
+  function head(title, sub, jsonKey, sectionKey) {
     return '<div class="x11-section-head"><div><h2 class="x11-section-title">' + esc(title) +
-      '</h2>' + (sub ? '<p class="x11-section-sub">' + esc(sub) + '</p>' : '') + '</div>' +
+      notSaved(sectionKey) + '</h2>' + (sub ? '<p class="x11-section-sub">' + esc(sub) + '</p>' : '') + '</div>' +
       (jsonKey ? '<button type="button" class="btn btn-muted btn-xs" data-json-toggle="' + esc(jsonKey) +
         '" aria-expanded="false" onclick="x11ToggleJson(this)">Show JSON</button>' : '') + '</div>';
   }
@@ -446,21 +500,14 @@
       esc(JSON.stringify(part, null, 2)) + '</pre>';
   }
 
-  function tabsHtml() {
-    return '<div class="x11-tabs" role="tablist" aria-label="Agents">' +
-      '<button type="button" class="x11-tab" role="tab" data-x11-tab="agents" aria-selected="' +
-      (S.tab === 'agents') + '" onclick="x11SetTab(\'agents\')">Agents</button>' +
-      '<button type="button" class="x11-tab" role="tab" data-x11-tab="rules" aria-selected="' +
-      (S.tab === 'rules') + '" onclick="x11SetTab(\'rules\')">Rules for all agents</button></div>';
-  }
-
   // ── Agents tab ────────────────────────────────────────────────────────
-  var SECTIONS = ['overview', 'tools', 'ssh', 'websites', 'activity', 'json'];
+  var SECTIONS = ['overview', 'run', 'tools', 'websites', 'activity', 'json'];
   function parseAgentHash() {
     var raw = String(window.location.hash || '');
     var m = /^#agent\/(\d+)(?:\/([a-z]+))?(?:\/([^/]+))?(?:\/([a-z]+))?$/.exec(raw);
     if (!m) return null;
     var section = m[2] || 'overview';
+    if (section === 'ssh') section = 'run';
     if (SECTIONS.indexOf(section) === -1) section = 'overview';
     var out = { id: Number(m[1]), section: section, integration: '', tab: '' };
     if (section === 'tools' && m[3]) {
@@ -492,6 +539,10 @@
   }
   function x11ShowAgents() {
     if (!root()) return;
+    if (/^#home-?wide\b/.test(String(window.location.hash || ''))) {
+      x11ShowHomewide();
+      return;
+    }
     var target = parseAgentHash();
     if (target) {
       if (!S.agent || Number(S.agent.id) !== target.id) {
@@ -504,8 +555,16 @@
       return;
     }
     S.integration = ''; S.integrationTab = '';
-    if (S.screen === 'editor' && S.agent) { renderEditor(); return; }
-    S.screen = 'agents'; S.tab = S.tab === 'rules' ? 'rules' : 'agents';
+    if (S.screen === 'editor' && S.agent) {
+      if (isDirty() && !confirmLeave()) {
+        setAgentHash(S.agent.id, S.section, S.integration, S.integrationTab);
+        return;
+      }
+      S.draft = docOf(S.config);
+      x11Back(true);
+      return;
+    }
+    S.screen = 'agents'; S.tab = 'agents';
     renderAgents();
     if (!S.agentsReady) loadAgents();
   }
@@ -516,17 +575,30 @@
       api('/api/ha/devices').catch(function () { return { devices: S.devices || [] }; }),
       api('/api/ha/labels').catch(function () { return { labels: S.labels || [] }; }),
       api('/api/allowances').catch(function () { return []; }),
+      api('/api/integrations').catch(function () { return []; }),
+      api('/api/requests').catch(function () { return []; }),
+      api('/api/integration-calls/pending').catch(function () { return []; }),
+      api('/api/window-requests/pending').catch(function () { return []; }),
+      api('/api/gateways').catch(function () { return []; }),
     ]).then(function (first) {
       var agents = first[0] || [];
       S.devices = first[1].devices || S.devices || [];
       S.labels = first[2].labels || S.labels || [];
       S.allowances = first[3] || S.allowances || [];
+      S.integrations = first[4] || S.integrations || [];
+      S.pendingRequests = first[5] || [];
+      S.pendingCalls = first[6] || [];
+      S.pendingWindows = first[7] || [];
+      S.gateways = first[8] || S.gateways || [];
       return Promise.all(agents.map(function (a) {
         return Promise.all([
           api('/api/agents/' + a.id + '/config').catch(function () { return null; }),
           api('/api/agents/' + a.id + '/available-tools').catch(function () { return { integrations: [] }; }),
+          api('/api/agents/' + a.id + '/tools-summary').catch(function () { return null; }),
+          api('/api/agents/' + a.id + '/activity').catch(function () { return {}; }),
         ]).then(function (pair) {
-          return { agent: a, config: pair[0], integrations: pair[1].integrations || [] };
+          return { agent: a, config: pair[0], integrations: pair[1].integrations || [],
+            summary: pair[2], activity: pair[3] || {} };
         });
       }));
     }).then(function (rows) {
@@ -539,60 +611,206 @@
     });
   }
 
-  function x11SetTab(tab) {
-    S.tab = tab === 'rules' ? 'rules' : 'agents';
+  function x11SetTab() {
     S.screen = 'agents';
-    if (S.tab === 'rules') renderRules(); else renderAgents();
+    renderAgents();
+  }
+
+  function agentTemplateKey(entry) {
+    var id = String(entry.agent.id);
+    try {
+      var map = JSON.parse(window.localStorage.getItem('eshu.x11.agentTemplates') || '{}');
+      if (map[id]) return map[id];
+    } catch (e) { /* private mode */ }
+    var p = entry.agent.policy || {};
+    if (p.test_agent) return 'test';
+    var hosts = ((entry.config || {}).ssh || {}).hosts || [];
+    var tools = ((entry.config || {}).tools || {}).allow || [];
+    var perms = ((entry.config || {}).home_assistant || {}).permissions || [];
+    if (hosts.length) return 'ops';
+    if (tools.length || perms.length) return 'household';
+    return 'empty';
+  }
+  function agentType(entry) {
+    var key = agentTemplateKey(entry);
+    return ({ household: 'Household', ops: 'Ops', test: 'Test agent',
+      observer: 'Observer' })[key] || 'Custom';
+  }
+  function pendingForAgent(name) {
+    var n = 0;
+    (S.pendingRequests || []).forEach(function (r) {
+      if (r.status === 'pending' && (r.agent || '') === name) n += 1;
+    });
+    (S.pendingCalls || []).forEach(function (c) {
+      if ((c.agent || '') === name) n += 1;
+    });
+    (S.pendingWindows || []).forEach(function (w) {
+      if ((w.agent || '') === name) n += 1;
+    });
+    return n;
+  }
+  function joinCountForAgent(id) {
+    return (S.allowances || []).filter(function (r) {
+      return Number(r.agent_id) === Number(id) && !Number(r.revoked_at);
+    }).reduce(function (n, r) { return n + pendingOf(r).length; }, 0);
+  }
+  function deviceForLabel(id) {
+    return (S.devices || []).filter(function (d) { return d.id === id; })[0] || {};
+  }
+  function activityWords(call) {
+    var integration = call.integration || '';
+    var tool = call.tool || '';
+    var summary = {};
+    try { summary = JSON.parse(call.request_summary || '{}'); } catch (e) { summary = {}; }
+    var domain = String(summary.domain || '').toLowerCase();
+    var service = String(summary.service || '').toLowerCase();
+    var data = summary.data || summary;
+    var entity = data.entity_id ||
+      (Array.isArray(data.entity_ids) ? data.entity_ids[0] : '') ||
+      (Array.isArray(summary.entity_id) ? summary.entity_id[0] : summary.entity_id) || '';
+    if (tool === 'call_service' && service) {
+      var verb = ({ turn_on: 'turned on', turn_off: 'turned off',
+        toggle: 'toggled', open_cover: 'opened', close_cover: 'closed',
+        media_play: 'played', media_pause: 'paused' })[service] ||
+        (service.replace(/_/g, ' '));
+      var name = entity ? (deviceForLabel(entity).name || entity) : (domain || 'a device');
+      return verb + ' ' + name;
+    }
+    var pretty = humanToolName(tool || integration).toLowerCase();
+    return 'used ' + (integration ? integration + ' / ' : '') + pretty;
+  }
+  function latestActivity(entry) {
+    var a = entry.activity || {};
+    var rows = [];
+    (a.calls || []).forEach(function (c) {
+      rows.push({ ts: Number(c.created_at || 0), text: activityWords(c) });
+    });
+    (a.requests || []).forEach(function (r) {
+      var host = r.hostname || r.target_ip || 'a machine';
+      rows.push({ ts: Number(r.created_at || 0),
+        text: 'ran a command on ' + host });
+    });
+    (a.sessions || []).forEach(function (s) {
+      rows.push({ ts: Number(s.last_seen || s.started_at || s.created_at || 0),
+        text: 'started \u201c' + (s.goal || 'a session') + '\u201d' });
+    });
+    rows = rows.filter(function (r) { return r.ts > 0; });
+    rows.sort(function (x, y) { return y.ts - x.ts; });
+    return rows[0] || null;
+  }
+  function topTiles(entry) {
+    var tiles = ((entry.summary || {}).tiles || []).filter(function (t) {
+      return t.kind !== 'ssh' && t.kind !== 'websites' && t.usable > 0;
+    });
+    tiles.sort(function (a, b) { return b.usable - a.usable || a.name.localeCompare(b.name); });
+    return tiles.slice(0, 4);
+  }
+  function cardMachineText(cfg) {
+    var hosts = ((cfg || {}).ssh || {}).hosts || [];
+    if (!hosts.length) return 'No machines';
+    if (hosts.indexOf('*') !== -1) return 'Any machine';
+    return hosts.map(function (ip) {
+      var g = (S.gateways || []).filter(function (x) { return x.ip === ip; })[0];
+      return (g && g.hostname) || ip;
+    }).join(', ');
+  }
+  function cardNeeds(entry) {
+    var bits = [];
+    var pending = pendingForAgent(entry.agent.name || '');
+    var paused = pausedCount(entry.config);
+    var join = joinCountForAgent(entry.agent.id);
+    if (pending) bits.push(pending + ' card' + (pending === 1 ? '' : 's') + ' waiting');
+    if (paused) bits.push(paused + ' paused');
+    if (join) bits.push(join + ' device' + (join === 1 ? '' : 's') + ' waiting to join');
+    return bits.join(' \u00b7 ');
+  }
+  function agentCardHtml(entry) {
+    var a = entry.agent;
+    var last = latestActivity(entry);
+    var status = a.revoked ? 'Token revoked'
+      : ((entry.summary || {}).frozen ? 'Frozen' : 'Active');
+    var needs = cardNeeds(entry);
+    var tiles = topTiles(entry);
+    var bars = tiles.map(function (t) {
+      return '<div class="x11-mini"><span class="x11-mini-name">' + esc(t.display || t.name) +
+        '</span>' + accessBar(t.run, t.ask, t.none, tileBarLabel(t), t.depends, t.frozen) +
+        '<span class="x11-mini-count">' + t.usable + '</span></div>';
+    }).join('');
+    return '<a class="x11-agent-card" href="#agent/' + Number(a.id) + '/overview" data-agent-card ' +
+      'data-agent-id="' + Number(a.id) + '" aria-label="Open ' + attr(a.name) + '">' +
+      '<div class="x11-agent-card-head"><span class="x11-agent-name">' + esc(a.name) + '</span>' +
+      '<span class="x11-agent-status"><span class="badge">' + esc(agentType(entry)) + '</span> ' +
+      '<span class="badge' + (a.revoked ? ' badge-denied' : '') + '">' + esc(status) + '</span></span></div>' +
+      '<p class="x11-agent-last">' + (last
+        ? 'Last: ' + esc(last.text) + ' \u00b7 ' + esc(ago(last.ts))
+        : 'Never used') + '</p>' +
+      '<div class="x11-mini-bars" aria-label="Top integrations by use">' +
+      (bars || '<span class="x11-muted">No integrations in use.</span>') + '</div>' +
+      '<p class="x11-agent-machines">Run commands on: <b>' + esc(cardMachineText(entry.config)) + '</b></p>' +
+      (needs ? '<p class="x11-agent-needs" data-agent-needs>' + esc(needs) + '</p>' : '') +
+      '</a>';
+  }
+  function x11CounterWaiting() {
+    for (var i = 0; i < S.agents.length; i += 1) {
+      if (pendingForAgent(S.agents[i].agent.name || '')) {
+        location.hash = '#agent/' + Number(S.agents[i].agent.id) + '/overview';
+        return;
+      }
+    }
+  }
+  function x11CounterPaused() {
+    for (var i = 0; i < S.agents.length; i += 1) {
+      if (pausedCount(S.agents[i].config)) {
+        location.hash = '#agent/' + Number(S.agents[i].agent.id) + '/overview';
+        return;
+      }
+    }
+  }
+  function x11CounterJoin() {
+    for (var i = 0; i < S.agents.length; i += 1) {
+      if (joinCountForAgent(S.agents[i].agent.id)) {
+        location.hash = '#agent/' + Number(S.agents[i].agent.id) + '/tools/Home%20Assistant/runs';
+        return;
+      }
+    }
   }
 
   function renderAgents(message) {
     var r = root();
     if (!r) return;
-    if (S.tab === 'rules') { renderRules(); return; }
-    var paused = 0;
-    S.agents.forEach(function (a) { paused += pausedCount(a.config); });
-    var banner = paused ? '<div class="x11-paused-banner"><strong>' + paused +
-      ' paused</strong><span>' + (paused === 1 ? 'One permission is waiting.' : 'Some permissions are waiting.') +
-      '</span><button type="button" class="btn btn-muted btn-sm" data-paused-review onclick="x11ReviewPaused()">Review</button></div>' : '';
-    var waiting = 0;
-    S.agents.forEach(function (a) { waiting += waitingCount(a.agent.id); });
-    if (waiting) {
-      banner += '<div class="x11-paused-banner x11-waiting-banner" data-waiting-banner>' +
-        '<strong>' + waiting + ' waiting</strong><span>' +
-        (waiting === 1 ? 'A new device has the label.' : 'New devices have the label.') +
-        '</span> \u00b7 <button type="button" class="btn btn-muted btn-sm" data-waiting-review ' +
-        'onclick="x11ReviewWaiting()">Review</button></div>';
-    }
-    var cards = S.agents.map(function (entry) {
-      var a = entry.agent, cfg = entry.config;
-      var n = pausedCount(cfg);
-      return '<article class="x11-card" data-agent-card data-agent-id="' + Number(a.id) +
-        '" tabindex="0" role="button" aria-label="Edit agent ' + attr(a.name) + '" ' +
-        'onclick="x11OpenAgent(this.dataset.agentId)" ' +
-        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();x11OpenAgent(this.dataset.agentId);}">' +
-        '<div class="x11-card-head"><span class="x11-card-name">' + esc(a.name) + '</span>' +
-        '<span>' + (a.policy && a.policy.test_agent ? '<span class="x11-badge">Test agent</span> ' : '') +
-        (a.revoked ? '<span class="x11-badge">Revoked</span>' : '') + '</span></div>' +
-        '<p class="x11-card-summary">' + esc(summaryFor(cfg, entry.integrations)) + '</p>' +
-        '<p class="x11-card-meta">Last active ' + esc(ago(a.last_used_at)) + '</p>' +
-        '<p class="x11-card-paused"' + (n ? '' : ' hidden') + '>' + n + ' paused</p>' +
-        '<p class="x11-card-waiting"' + (waitingCount(a.id) ? '' : ' hidden') + '>' +
-        waitingCount(a.id) + ' waiting to join</p>' +
-        '<div class="x11-btn-row"><button type="button" class="btn btn-muted btn-xs" ' +
-        'onclick="event.stopPropagation();x11OpenAgent(this.closest(\'[data-agent-id]\').dataset.agentId)">Edit agent</button></div>' +
-        '</article>';
-    }).join('');
+    var pending = 0, paused = 0, joining = 0;
+    S.agents.forEach(function (entry) {
+      pending += pendingForAgent(entry.agent.name || '');
+      paused += pausedCount(entry.config);
+      joining += joinCountForAgent(entry.agent.id);
+    });
+    var cards = S.agents.slice().sort(function (a, b) {
+      var an = !!(pendingForAgent(a.agent.name || '') || pausedCount(a.config) ||
+        joinCountForAgent(a.agent.id));
+      var bn = !!(pendingForAgent(b.agent.name || '') || pausedCount(b.config) ||
+        joinCountForAgent(b.agent.id));
+      if (an !== bn) return an ? -1 : 1;
+      var al = latestActivity(a), bl = latestActivity(b);
+      return ((bl && bl.ts) || b.agent.last_used_at || 0) -
+        ((al && al.ts) || a.agent.last_used_at || 0);
+    }).map(agentCardHtml).join('');
     var empty = S.agentsReady && !S.agents.length
-      ? '<p class="x11-plain">No agent tokens yet. Create one to give an agent a name and a token.</p>' : '';
+      ? '<p class="x11-plain">No agents yet. New agent starts with a name, a purpose and a token shown once.</p>' : '';
     r.innerHTML = '<div class="x11-hud"><div><div class="x11-title-row"><h1 class="x11-title">Agents</h1>' +
       '<button type="button" class="btn btn-sm" data-new-agent onclick="x11NewAgent()">New agent</button></div>' +
-      '<p class="x11-lede">What each agent can do on its own, and how to change it.</p></div>' +
+      '<p class="x11-lede">What each agent can do on its own, and what needs you.</p></div>' +
       '<div class="x11-hud-right" id="x11-hud-count">' + S.agents.length + ' agent' + (S.agents.length === 1 ? '' : 's') + '</div></div>' +
-      tabsHtml() +
+      '<div class="x11-counters" data-agent-counters>' +
+      '<button type="button" class="x11-counter" data-counter="waiting" onclick="x11CounterWaiting()"><b>' + pending +
+      '</b><span>Waiting for you</span></button>' +
+      '<button type="button" class="x11-counter" data-counter="paused" onclick="x11CounterPaused()"><b>' + paused +
+      '</b><span>Paused permissions</span></button>' +
+      '<button type="button" class="x11-counter" data-counter="join" onclick="x11CounterJoin()"><b>' + joining +
+      '</b><span>Devices waiting to join</span></button></div>' +
       '<div id="x11-notice" class="x11-notice"' + (message || S.notice ? '' : ' hidden') + ' data-kind="' +
       esc((S.notice && S.notice.kind) || (message ? 'error' : '')) + '">' +
-      esc(message || (S.notice && S.notice.text) || '') + '</div>' + banner +
-      '<div class="x11-cards">' + cards + '</div>' + empty + previewModalHtml() + newAgentModalHtml();
+      esc(message || (S.notice && S.notice.text) || '') + '</div>' +
+      '<div class="x11-cards">' + cards + '</div>' + empty + previewModalHtml() + newAgentModalHtml() + leaveWarningHtml();
     if (!S.agentsReady) {
       r.querySelector('.x11-cards').insertAdjacentHTML('afterend', '<p class="x11-plain">Loading agents\u2026</p>');
     }
@@ -613,32 +831,56 @@
     }
   }
 
-  // ── Rules tab ─────────────────────────────────────────────────────────
-  function renderRules() {
-    var r = root();
-    if (!r) return;
-    r.innerHTML = '<div class="x11-hud"><div><h1 class="x11-title">Rules for all agents</h1>' +
-      '<p class="x11-lede">Protected devices, the limits every agent shares, and what is never allowed.</p></div></div>' +
-      tabsHtml() + '<div id="x11-notice" class="x11-notice"' + (S.notice ? '' : ' hidden') + ' data-kind="' +
-      esc((S.notice && S.notice.kind) || '') + '">' + esc((S.notice && S.notice.text) || '') + '</div>' +
-      '<div class="x11-rules" data-rules-panel>' +
+  // ── Home-wide rules (inside Home Assistant) ──────────────────────────
+  function homewideBodyHtml() {
+    return '<div class="x11-rules" data-rules-panel data-homewide>' +
+      '<div class="x11-homewide-banner" data-homewide-banner>Applies to every agent.</div>' +
       '<div class="x11-rules-help" data-permissions-help>' +
       '<h2>How permissions work</h2>' +
       '<p>Limits decide which kinds of action can ever be allowed. Protected devices can never be ' +
       'given to an agent. Each agent then picks devices or follows Home Assistant labels, within those limits.</p>' +
       '</div>' +
-      '<details data-rules="protected"' + (S.protectedEditing ? ' open' : '') + '><summary>Protected devices</summary><div class="x11-rules-body" id="x11-protected-body">' +
+      '<details data-rules="protected" open><summary>Protected devices</summary><div class="x11-rules-body" id="x11-protected-body">' +
       '<p class="x11-section-sub">No agent can be given a protected device. Existing permissions that hold one are paused; unprotecting does not resume them.</p>' +
       '<div id="x11-protected-list">' + protectedSummaryHtml() + '</div></div></details>' +
-      '<details data-rules="limits"><summary>Limits for all agents</summary><div class="x11-rules-body" id="x11-limits-body">' +
+      '<details data-rules="limits" open><summary>Limits for all agents</summary><div class="x11-rules-body" id="x11-limits-body">' +
       '<p class="x11-section-sub">The outer limit. An agent can only be given an action that is enabled here.</p>' +
       '<div id="x11-ceiling-list">' + (S.ceiling ? ceilingListHtml() : '<p class="x11-muted">Loading limits\u2026</p>') + '</div>' +
       '<div class="x11-btn-row"><button type="button" class="btn btn-sm" onclick="x11SaveCeiling()">Save limits</button></div></div></details>' +
       '<details data-rules="never"><summary>Never allowed</summary><div class="x11-rules-body" id="x11-never-body">' +
       '<p class="x11-section-sub">Read-only reference, except for words you add yourself.</p>' +
-      (S.ceiling ? neverHtml() : '<p class="x11-muted">Loading\u2026</p>') + '</div></details></div>' +
-      previewModalHtml() + newAgentModalHtml();
+      (S.ceiling ? neverHtml() : '<p class="x11-muted">Loading\u2026</p>') + '</div></details></div>';
+  }
+
+  function renderHomewide(message) {
+    var r = root();
+    if (!r) return;
+    r.innerHTML = '<div class="x11-hud"><div><h1 class="x11-title">Home-wide rules</h1>' +
+      '<p class="x11-lede">Protected devices and the limits every agent shares. Reachable from Home Assistant too.</p></div>' +
+      '<button type="button" class="btn btn-muted btn-sm" onclick="x11Back()">All agents</button></div>' +
+      '<div id="x11-notice" class="x11-notice"' + (message || S.notice ? '' : ' hidden') + ' data-kind="' +
+      esc((S.notice && S.notice.kind) || (message ? 'error' : '')) + '">' +
+      esc(message || (S.notice && S.notice.text) || '') + '</div>' +
+      homewideBodyHtml() + previewModalHtml() + newAgentModalHtml();
     if (!S.ceiling || !S.devices.length) loadRules();
+  }
+
+  function x11OpenHomewide(back) {
+    S.screen = 'homewide';
+    S.homewideBack = back || 'agents';
+    window.history.replaceState(null, '', '#homewide');
+    if (window.switchView && document.getElementById('view-agents') &&
+        document.getElementById('view-agents').classList.contains('hidden')) {
+      window.switchView('agents');
+      return;
+    }
+    renderHomewide();
+    if (!S.ceiling || !S.devices.length) loadRules();
+  }
+
+  function x11ShowHomewide() {
+    if (!root()) return;
+    x11OpenHomewide('agents');
   }
 
   function loadRules() {
@@ -653,8 +895,14 @@
       S.labels = out[1].labels || [];
       S.protected = (out[2].entities || []).map(function (x) { return x.entity_id; });
       S.ceiling = out[3].error ? null : out[3];
-      if (S.tab === 'rules') renderRules();
+      if (S.screen === 'homewide') renderHomewide();
+      else if (S.screen === 'editor') renderEditor();
     });
+  }
+
+  function rerenderHomewide() {
+    if (S.screen === 'homewide') renderHomewide();
+    else if (S.screen === 'editor') renderEditor();
   }
 
   function protectedSummaryHtml() {
@@ -672,7 +920,7 @@
     return protectedListHtml() +
       '<label class="x11-plain"><input type="checkbox" data-protect-settings onchange="x11ProtectedSettings(this.checked)"' +
       (S.protectedSettings ? ' checked' : '') + '> Show settings entities</label>' +
-      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" onclick="x11SaveProtected()">Save protected devices</button>' +
+      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-save-protected onclick="x11SaveProtected()">Save protected devices</button>' +
       '<button type="button" class="btn btn-muted btn-sm" onclick="x11CancelProtect()">Cancel</button></div>';
   }
   function protectedListHtml() {
@@ -695,9 +943,9 @@
         }).join('') + '</div></div>';
     }).join('') || '<p class="x11-muted">No devices from Home Assistant.</p>';
   }
-  function x11StartProtect() { S.protectedEditing = true; renderRules(); }
-  function x11CancelProtect() { S.protectedEditing = false; renderRules(); }
-  function x11ProtectedSettings(v) { S.protectedSettings = !!v; renderRules(); }
+  function x11StartProtect() { S.protectedEditing = true; rerenderHomewide(); }
+  function x11CancelProtect() { S.protectedEditing = false; rerenderHomewide(); }
+  function x11ProtectedSettings(v) { S.protectedSettings = !!v; rerenderHomewide(); }
 
   function ceilingListHtml() {
     if (!S.ceiling || !S.ceiling.catalogue) return '<p class="x11-muted">Limits are unavailable.</p>';
@@ -722,10 +970,10 @@
       }).join('') + '</div>' +
       '<div class="x11-tool-group"><h3>Destructive words</h3><div class="x11-check-grid">' +
       ((c.words || {}).builtin || []).map(function (w) {
-        return '<span class="x11-badge">' + esc(w) + '</span>';
+        return '<span class="badge">' + esc(w) + '</span>';
       }).join('') + '</div>' +
       '<div class="x11-check-grid">' + ((c.words || {}).operator || []).map(function (w) {
-        return '<span class="x11-badge">' + esc(w) + ' <button type="button" class="link-btn" ' +
+        return '<span class="badge">' + esc(w) + ' <button type="button" class="link-btn" ' +
           'data-word="' + attr(w) + '" onclick="x11RemoveWord(this)" aria-label="Remove word ' + attr(w) + '">\u00d7</button></span>';
       }).join('') + '</div>' +
       '<div class="x11-btn-row"><input type="text" id="x11-word-input" placeholder="word (a-z0-9_, 3-32)" maxlength="32" aria-label="New never word">' +
@@ -745,7 +993,7 @@
       S.devices = [];
       S.ceiling = null;
       S.agentsReady = false;
-      renderRules();
+      loadRules();
     }).catch(function (e) { setNotice(errText(e), 'error'); });
   }
 
@@ -791,7 +1039,50 @@
   }
 
   // ── Agent editor ──────────────────────────────────────────────────────
+  function confirmLeave() {
+    if (!isDirty()) return true;
+    return window.confirm('You have unsaved changes. Leave without saving them?');
+  }
+  function leaveWarningHtml() {
+    return '<div id="x11-leave-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="x11-leave-title">' +
+      '<div class="x11-leave-card"><h2 id="x11-leave-title">Leave without saving?</h2>' +
+      '<p class="x11-plain" id="x11-leave-text">This agent has unsaved changes. They will be lost.</p>' +
+      '<div class="x11-btn-row"><button type="button" class="btn btn-muted btn-sm" data-leave-stay onclick="x11LeaveStay()">Stay</button>' +
+      '<button type="button" class="btn btn-deny btn-sm" data-leave-go onclick="x11LeaveGo()">Leave</button></div></div></div>';
+  }
+  function showLeaveWarning(action) {
+    S.leaveAction = action;
+    var m = el('x11-leave-modal');
+    if (!m) {
+      if (root()) root().insertAdjacentHTML('beforeend', leaveWarningHtml());
+      m = el('x11-leave-modal');
+    }
+    if (!m) { action(); return; }
+    var text = el('x11-leave-text');
+    if (text) text.textContent = changeSummaryText() + '. They will be lost.';
+    m.classList.remove('hidden');
+    var stay = m.querySelector('[data-leave-stay]');
+    if (stay) stay.focus();
+  }
+  function x11LeaveStay() {
+    S.leaveAction = null;
+    var m = el('x11-leave-modal'); if (m) m.classList.add('hidden');
+  }
+  function x11LeaveGo() {
+    var action = S.leaveAction;
+    S.leaveAction = null;
+    var m = el('x11-leave-modal'); if (m) m.classList.add('hidden');
+    if (action) action();
+  }
   function x11OpenAgent(id, section, keepNotice, route) {
+    if (S.agent && Number(S.agent.id) !== Number(id) && isDirty()) {
+      if (!confirmLeave()) {
+        setAgentHash(S.agent.id, S.section, S.integration, S.integrationTab);
+        return;
+      }
+      S.draft = docOf(S.config);
+    }
+    if (S.agent && Number(S.agent.id) !== Number(id)) S.testSetup = null;
     S.screen = 'editor';
     var target = route || { section: section };
     applyRoute(target);
@@ -836,6 +1127,14 @@
       S.toolJsonOpen = false;
       defaultDeviceFilter();
       if (!keepNotice) S.notice = null;
+      try {
+        var savedKey = 'eshu.x11.saved.' + Number(id);
+        var savedText = window.sessionStorage.getItem(savedKey);
+        if (savedText) {
+          S.notice = { text: 'Saved: ' + savedText, kind: 'success' };
+          window.sessionStorage.removeItem(savedKey);
+        }
+      } catch (e) { /* private mode */ }
       window.scrollTo(0, 0);
       renderEditor();
     }).catch(function (e) {
@@ -845,16 +1144,70 @@
   }
   window.x11OpenAgent = x11OpenAgent;
 
-  function sectionDiffCount() {
-    if (!S.config || !S.draft) return 0;
-    var base = docOf(S.config);
+  function _permissionKey(p) {
+    return [p.domain || '', p.service || '', p.label_id || '',
+      (p.entities || []).slice().sort().join(',')].join('|');
+  }
+  function _permissionCount(before, after) {
+    var old = {}, now = {};
+    (before || []).forEach(function (p) { old[_permissionKey(p)] = p; });
+    (after || []).forEach(function (p) { now[_permissionKey(p)] = p; });
     var n = 0;
-    ['tools', 'ssh', 'websites', 'home_assistant'].forEach(function (k) {
-      if (!same(base[k], S.draft[k])) n += 1;
+    Object.keys(now).forEach(function (k) {
+      if (!old[k] || JSON.stringify(old[k]) !== JSON.stringify(now[k])) n += 1;
+    });
+    Object.keys(old).forEach(function (k) { if (!now[k]) n += 1; });
+    return n;
+  }
+  function _toolsChanges(before, after) {
+    var a = before || {}, b = after || {}, n = 0;
+    ['mode', 'allow', 'approval', 'argument_rules', 'rate_limit_per_min'].forEach(function (k) {
+      if (!same(a[k] === undefined ? null : a[k], b[k] === undefined ? null : b[k])) n += 1;
     });
     return n;
   }
+  function _simpleChanges(before, after) {
+    var a = before || {}, b = after || {}, n = 0;
+    ['mode', 'hosts', 'enabled', 'allow', 'deny'].forEach(function (k) {
+      if (!same(a[k] === undefined ? null : a[k], b[k] === undefined ? null : b[k])) n += 1;
+    });
+    return n;
+  }
+  function changeParts() {
+    if (!S.config || !S.draft) return [];
+    var base = docOf(S.config);
+    var parts = [];
+    var tools = _toolsChanges(base.tools, S.draft.tools);
+    var ssh = _simpleChanges(base.ssh, S.draft.ssh);
+    var web = _simpleChanges(base.websites, S.draft.websites);
+    var ha = _permissionCount((base.home_assistant || {}).permissions,
+      (S.draft.home_assistant || {}).permissions);
+    if (tools) parts.push({ key: 'tools', label: 'Tools', count: tools });
+    if (ssh) parts.push({ key: 'ssh', label: 'Run commands', count: ssh });
+    if (web) parts.push({ key: 'websites', label: 'Websites', count: web });
+    if (ha) parts.push({ key: 'home_assistant', label: 'Home Assistant', count: ha });
+    return parts;
+  }
+  function sectionDiffCount() {
+    return changeParts().reduce(function (n, p) { return n + p.count; }, 0);
+  }
+  function sectionChanged(key) {
+    return changeParts().some(function (p) { return p.key === key; });
+  }
+  function changeSummaryText() {
+    var parts = changeParts();
+    if (!parts.length) return '';
+    var total = parts.reduce(function (n, p) { return n + p.count; }, 0);
+    return total + ' change' + (total === 1 ? '' : 's') + ' in ' +
+      parts.map(function (p) { return p.label; }).join(', ');
+  }
   function isDirty() { return sectionDiffCount() > 0; }
+
+  function syncNotSaved() {
+    Array.prototype.slice.call(document.querySelectorAll('[data-unsaved]')).forEach(function (el) {
+      el.hidden = !sectionChanged(el.getAttribute('data-unsaved'));
+    });
+  }
 
   function renderEditor() {
     var r = root();
@@ -864,8 +1217,8 @@
     if (!document.activeElement || document.activeElement.id !== 'x11-json-doc') {
       S.jsonText = JSON.stringify(S.draft, null, 2);
     }
-    var nav = [['overview', 'Overview'], ['tools', 'Tools'], ['ssh', 'SSH'],
-      ['websites', 'Websites'], ['activity', 'Activity'], ['json', 'JSON']];
+    var nav = [['overview', 'Overview'], ['run', 'Run commands'],
+      ['tools', 'Tools'], ['websites', 'Websites'], ['activity', 'Activity']];
     var navHtml = nav.map(function (x) {
       return '<button type="button" class="x11-tab" role="tab" data-x11-nav="' + x[0] +
         '" aria-selected="' + (S.section === x[0]) + '" aria-current="' +
@@ -875,7 +1228,7 @@
     if (S.section === 'tools' && S.integration) content = sectionIntegration();
     else if (S.section === 'tools') content = sectionTools();
     else {
-      var sectionFn = { overview: sectionOverview, ssh: sectionSsh,
+      var sectionFn = { overview: sectionOverview, run: sectionRun,
         websites: sectionWebsites, activity: sectionActivity, json: sectionJson };
       content = (sectionFn[S.section] || sectionOverview)();
     }
@@ -885,6 +1238,7 @@
       '<div class="x11-editor-status">' + (a.revoked ? 'Revoked' : 'Active') +
       ' \u00b7 last active ' + esc(ago(a.last_used_at)) + '</div></div>' +
       '<div class="x11-editor-actions"><button type="button" class="btn btn-muted btn-xs" onclick="x11Back()">All agents</button>' +
+      '<button type="button" class="btn btn-muted btn-xs" data-json-page onclick="x11Nav(\'json\')">Advanced JSON</button>' +
       '<button type="button" class="btn btn-muted btn-xs" data-token-actions onclick="x11ShowDanger()">Token</button></div></div>' +
       '<div class="x11-tabs x11-editor-tabs" role="tablist" aria-label="Agent sections">' + navHtml + '</div></header>' +
       '<div class="x11-editor-content">' +
@@ -892,11 +1246,12 @@
       esc((S.notice && S.notice.kind) || '') + '">' + esc((S.notice && S.notice.text) || '') + '</div>' +
       content + '</div></div>' +
       '<div class="x11-savebar" id="x11-savebar"' + (n ? '' : ' hidden') + '>' +
-      '<span class="x11-change-count" id="x11-change-count">' + n + ' change' + (n === 1 ? '' : 's') + '</span>' +
+      '<span class="x11-change-count" id="x11-change-count">' + esc(changeSummaryText()) + '</span>' +
       '<button type="button" class="btn btn-muted btn-sm" onclick="x11Discard()">Discard</button>' +
-      '<button type="button" class="btn btn-sm" id="x11-save-changes" onclick="x11Check()">Save changes</button></div>' +
-      previewModalHtml() + newAgentModalHtml();
+      '<button type="button" class="btn btn-sm" id="x11-save-changes" onclick="x11Check()">Save</button></div>' +
+      previewModalHtml() + newAgentModalHtml() + leaveWarningHtml();
     syncSavebarSpace();
+    syncNotSaved();
     syncJsonApplyButton();
     if (S.section === 'overview') x11LoadApproverTokens();
   }
@@ -1096,7 +1451,7 @@
     if (state === 'protected') {
       return '<span class="x11-pill x11-pill-protected" data-device-pill="' + attr(d.id) + '" ' +
         'data-state="protected">Protected</span> ' +
-        '<a class="x11-pill-link" href="#" onclick="x11GoRules();return false;">Rules for all agents</a>';
+        '<a class="x11-pill-link" href="#" onclick="x11GoHomewide();return false;">Home-wide rules</a>';
     }
     var word = ({ none: 'not allowed', ask: 'asks you', run: 'on its own' })[state];
     return '<button type="button" class="x11-pill x11-pill-' + state + '" ' +
@@ -1118,7 +1473,7 @@
   }
   function protectedDeviceHtml() {
     return '<span class="x11-pill x11-pill-protected">Protected</span> ' +
-      '<a class="x11-pill-link" href="#" onclick="x11GoRules();return false;">Rules for all agents</a>';
+      '<a class="x11-pill-link" href="#" onclick="x11GoHomewide();return false;">Home-wide rules</a>';
   }
   function deviceRowHtml(d, hiddenMode) {
     var actions = hiddenMode ? [] : actionsFor(d);
@@ -1325,7 +1680,7 @@
       (waits.length ? '<div class="x11-waiting-list x11-waiting-grid" data-waiting-grid>' +
         waits.map(waitingRowHtml).join('') + '</div>' : '') +
       help +
-      '<p class="x11-plain"><a href="#" onclick="x11GoRules();return false;">Rules for all agents</a> ' +
+      '<p class="x11-plain"><a href="#" onclick="x11GoHomewide();return false;">Home-wide rules</a> ' +
       'holds the limits, protected devices and the actions no agent may use.</p></div>';
   }
   function x11EditPermission(i) {
@@ -1382,23 +1737,10 @@
     var waits = waitingRows(S.agent && S.agent.id);
     var waitHtml = waits.length ? '<div class="x11-waiting-list" data-waiting-list>' +
       '<h3>Waiting to join</h3>' + waits.map(waitingRowHtml).join('') + '</div>' : '';
-    var tests = '<details class="x11-e2e"><summary>Test agent and E2E approver tokens</summary>' +
-      '<p class="x11-section-sub">A test agent may only use HA reads, call service and ssh_exec, with exactly one SSH host. An approver token can decide only its E2E rows.</p>' +
-      '<label class="x11-plain"><input type="checkbox" id="agent-test-toggle" onchange="x11ToggleTestAgent(this)"' +
-      ((S.policy && S.policy.test_agent) ? ' checked' : '') + '> This agent is a test agent</label>' +
-      '<p class="x11-section-sub" id="agent-test-hint">' +
-      esc((S.policy && S.policy.test_agent)
-        ? "On: HA reads and call service only, exactly one SSH host. Clearing this revokes the agent's approver tokens."
-        : 'Off: enabling is refused once the agent has any session, request or call.') + '</p>' +
-      '<div class="x11-tool-group"><h3>Approver tokens</h3>' +
-      '<label class="x11-plain" for="approver-commands">Exact commands (one per line)</label>' +
-      '<textarea id="approver-commands" class="w-full text-xs" rows="3" placeholder="hostname&#10;id -un"></textarea>' +
-      '<div class="x11-btn-row"><label class="x11-plain">Test gateway IP <input id="approver-gateway" placeholder="192.0.2.10"></label>' +
-      '<label class="x11-plain">Days <input id="approver-days" type="number" min="1" max="30" value="30"></label>' +
-      '<button type="button" class="btn btn-sm" onclick="x11MintApproverToken()">Mint approver token</button></div>' +
-      '<div id="approver-token-result" class="x11-token-once" hidden></div>' +
-      '<div id="approver-token-list" class="x11-perm-list"><p class="x11-muted">Loading\u2026</p></div></div>' +
-      '</details>';
+    var tests = '<div class="x11-test-entry" data-test-entry>' +
+      '<div><h3>Use automated testing</h3><p class="x11-section-sub">Set this agent up for the E2E suite: one machine, the test flag, and a scoped approval token.</p></div>' +
+      '<button type="button" class="btn btn-sm" data-test-setup-open onclick="x11OpenTestSetup()">Use automated testing\u2026</button></div>' +
+      testSetupHtml();
     return '<section class="x11-section" id="x11-sec-overview" data-x11-section="overview">' +
       '<div class="x11-section-head"><div><h2 class="x11-section-title">Overview</h2>' +
       '<p class="x11-section-sub">What this agent can do on its own, in plain words.</p></div>' +
@@ -1422,6 +1764,162 @@
       '</div></div>' + jsonBlock('overview') + '</section>';
   }
 
+  function testSetupHtml() {
+    var t = S.testSetup;
+    if (!t || !t.open) return '';
+    if (t.step === 1) {
+      var hosts = (S.gateways || []).slice().sort(function (a, b) {
+        return hostLabel(a.ip).localeCompare(hostLabel(b.ip));
+      });
+      return '<section class="x11-test-setup" data-test-setup="1"><h3>Automated testing: one machine</h3>' +
+        '<p class="x11-section-sub">Pick the one machine the suite may reach. The test agent can use only Home Assistant reads, call_service and ssh_exec.</p>' +
+        '<div class="x11-pick-list" data-test-machines>' +
+        (hosts.map(function (g) {
+          return '<label class="x11-pick"><input type="radio" name="x11-test-host" data-test-host="' +
+            attr(g.ip) + '"' + (t.host === g.ip ? ' checked' : '') +
+            ' onchange="x11TestHost(this)"><span><b>' + esc(g.hostname || g.ip) +
+            '</b><span class="x11-pick-note">' + esc(g.ip) + '</span></span></label>';
+        }).join('') || '<p class="x11-muted">No machines are registered.</p>') + '</div>' +
+        '<div class="x11-change-list" data-test-changes><h4>Exactly what will change</h4><ul>' +
+        '<li>Test agent <b>on</b>.</li><li>Allowlist: Home Assistant reads, <code>call_service</code>, <code>ssh_exec</code>.</li>' +
+        '<li>Run commands: <b>Follow each machine\u2019s rules</b> on ' +
+        esc(t.host ? hostLabel(t.host) : 'the one machine you pick') + '.</li>' +
+        '<li>No ungated approvals.</li></ul></div>' +
+        (t.error ? '<div class="x11-notice" data-kind="error">' + esc(t.error) + '</div>' : '') +
+        '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-test-apply onclick="x11ApplyTestSetup()"' +
+        (t.busy || !t.host ? ' disabled' : '') + '>' + (t.busy ? 'Applying\u2026' : 'Apply') + '</button>' +
+        '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseTestSetup()">Cancel</button></div></section>';
+    }
+    if (t.step === 2) {
+      return '<section class="x11-test-setup" data-test-setup="2"><h3>Automated testing: approval token</h3>' +
+        '<p class="x11-section-sub">The test agent is on. This token can decide only its E2E rows on ' +
+        esc(hostLabel(t.host)) + ', for 7 days.</p>' +
+        '<div class="x11-field"><label for="x11-test-commands">Exact commands, from the E2E suite</label>' +
+        '<textarea id="x11-test-commands" rows="9" spellcheck="false">' +
+        esc((t.commands || []).join('\n')) + '</textarea></div>' +
+        '<p class="x11-section-sub">Machine: <b>' + esc(hostLabel(t.host)) + '</b> \u00b7 7 days</p>' +
+        (t.error ? '<div class="x11-notice" data-kind="error">' + esc(t.error) + '</div>' : '') +
+        '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-test-mint onclick="x11MintTestToken()"' +
+        (t.busy ? ' disabled' : '') + '>' + (t.busy ? 'Creating\u2026' : 'Create test approval token') + '</button>' +
+        '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseTestSetup()">Not now</button></div></section>';
+    }
+    return '<section class="x11-test-setup" data-test-setup="3"><h3>Automated testing ready</h3>' +
+      '<p class="x11-section-sub">Copy this token now; it is shown once. The E2E suite preflight passes with no other clicks.</p>' +
+      '<div class="x11-token-once" data-test-token>' + esc(t.token) + '</div>' +
+      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-test-copy onclick="x11TestTokenCopy()">Copy</button>' +
+      '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseTestSetup()">Done</button></div></section>';
+  }
+  function x11OpenTestSetup() {
+    S.testSetup = { open: true, step: 1, host: '', busy: false, error: '',
+      commands: [], token: '' };
+    api('/api/e2e/commands').then(function (body) {
+      if (!S.testSetup) return;
+      S.testSetup.commands = body.commands || [];
+      renderEditor();
+    }).catch(function () { /* the form still explains the setup */ });
+    renderEditor();
+  }
+  function x11CloseTestSetup() {
+    S.testSetup = null;
+    renderEditor();
+  }
+  function x11TestHost(input) {
+    if (!S.testSetup) return;
+    S.testSetup.host = input.getAttribute('data-test-host');
+    S.testSetup.error = '';
+    renderEditor();
+  }
+  function testDocument(base, host) {
+    var ha = (S.tools || []).filter(function (g) { return g.kind === 'ha'; })[0];
+    var allow = [], approval = {};
+    if (ha) {
+      (ha.tools || []).forEach(function (tool) {
+        if (tool.files) return;
+        if (!tool.read_only && tool.tool !== 'call_service') return;
+        allow.push(tool.name);
+        if (!tool.read_only) approval[tool.name] = 'gated';
+      });
+    }
+    var doc = docOf(base);
+    doc.tools = { mode: 'allowlist', allow: Array.from(new Set(allow)).sort(),
+      approval: approval, argument_rules: {}, rate_limit_per_min: 0 };
+    doc.ssh = { mode: 'normal', hosts: [host] };
+    return doc;
+  }
+  function x11ApplyTestSetup() {
+    var t = S.testSetup;
+    if (!t || !t.host || t.busy) return;
+    if (isDirty()) {
+      t.error = 'Save or discard your other changes first; automated testing applies on its own.';
+      renderEditor();
+      return;
+    }
+    var ha = (S.tools || []).filter(function (g) { return g.kind === 'ha'; })[0];
+    if (!ha) {
+      t.error = 'Add Home Assistant first: the test agent needs its reads and call_service.';
+      renderEditor();
+      return;
+    }
+    t.busy = true; t.error = '';
+    renderEditor();
+    var testDoc = testDocument(S.config, t.host);
+    applyConfigDocument(S.agent.id, testDoc)
+      .then(function (body) {
+        S.config = body.document || S.config;
+        S.draft = docOf(S.config);
+        return api('/api/agents/' + Number(S.agent.id) + '/test-agent', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: true }),
+        });
+      })
+      .then(function (policy) {
+        S.policy = policy || {};
+        S.agentsReady = false;
+        t.busy = false;
+        t.step = 2;
+        t.error = '';
+        renderEditor();
+        var setup = document.querySelector('[data-test-setup]');
+        if (setup) setup.scrollIntoView({ block: 'start' });
+      })
+      .catch(function (e) {
+        t.busy = false;
+        t.error = errText(e) || 'Could not set up automated testing.';
+        renderEditor();
+      });
+  }
+  function x11MintTestToken() {
+    var t = S.testSetup;
+    if (!t || t.busy) return;
+    var raw = (el('x11-test-commands') || {}).value || '';
+    var commands = raw.split('\n').map(function (x) { return x.replace(/\r$/, ''); }).filter(Boolean);
+    if (!commands.length) { t.error = 'The command list is empty.'; renderEditor(); return; }
+    t.busy = true; t.error = '';
+    renderEditor();
+    api('/api/approver-tokens', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: Number(S.agent.id), commands: commands,
+        gateway_ip: t.host, days: 7 }),
+    }).then(function (body) {
+      t.busy = false; t.step = 3; t.token = body.token || '';
+      renderEditor();
+      var setup = document.querySelector('[data-test-setup]');
+      if (setup) setup.scrollIntoView({ block: 'start' });
+    }).catch(function (e) {
+      t.busy = false; t.error = errText(e);
+      renderEditor();
+    });
+  }
+  function x11TestTokenCopy() {
+    var t = S.testSetup;
+    if (!t || !t.token) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t.token).then(function () { toast('Token copied', 'success'); });
+    } else {
+      toast('Select the token and copy it.', 'error');
+    }
+  }
+
   function x11LoadApproverTokens() {
     var box = el('approver-token-list');
     if (!box || !S.agent) return;
@@ -1431,7 +1929,7 @@
       box.innerHTML = rows.map(function (t) {
         var state = t.revoked ? 'revoked' : (t.expired ? 'expired' : 'live');
         return '<div class="x11-perm"><div class="x11-perm-line"><b>#' + esc(t.id) + '</b> ' +
-          '<span>' + esc(state) + '</span><span>gateway ' + esc(t.gateway_ip || '\u2014') + '</span>' +
+          '<span>' + esc(state) + '</span><span>gateway ' + esc(t.gateway_ip ? hostLabel(t.gateway_ip) : '\u2014') + '</span>' +
           '<span>' + esc(String((t.commands || []).length)) + ' command(s)</span>' +
           '<span>expires ' + esc(t.expires_at ? when(t.expires_at) : '\u2014') + '</span></div>' +
           '<div class="x11-mono">' + esc((t.commands || []).join('\n')) + '</div>' +
@@ -1597,13 +2095,7 @@
   }
 
   function toolGroup(name) {
-    var group = (S.tools || []).filter(function (g) { return g.integration === name; })[0];
-    if (group) return group;
-    if (name === 'SSH') return { integration: 'SSH', kind: 'ssh', tools: [], virtual: true };
-    if (name === 'Websites') {
-      return { integration: 'Websites', kind: 'websites', tools: [], virtual: true };
-    }
-    return null;
+    return (S.tools || []).filter(function (g) { return g.integration === name; })[0] || null;
   }
   function toolsOf(group) {
     return ((group || {}).tools || []).filter(function (t) { return t.enabled !== false; });
@@ -1651,7 +2143,11 @@
     return 'devices';
   }
   function currentTiles() {
-    if (S.summary && S.summary.tiles && !isDirty()) return S.summary.tiles;
+    if (S.summary && S.summary.tiles && !isDirty()) {
+      return S.summary.tiles.filter(function (t) {
+        return t.kind !== 'ssh' && t.kind !== 'websites';
+      });
+    }
     var out = [];
     (S.tools || []).forEach(function (g) {
       var tools = toolsOf(g);
@@ -1682,25 +2178,6 @@
         in_use: inUse, extra: extra, virtual: false,
       });
     });
-    var ssh = (S.draft.ssh || {});
-    var hosts = ssh.hosts || [];
-    var sshRun = hosts.length && ssh.mode === 'normal' ? 1 : 0;
-    var sshAsk = hosts.length && ssh.mode !== 'normal' ? 1 : 0;
-    out.push({ key: 'SSH', name: 'SSH', kind: 'ssh', kind_words: 'SSH',
-      mark: 'SS', total: 1, run: sshRun, ask: sshAsk, depends: 0, frozen: 0,
-      display: 'SSH', none: 1 - sshRun - sshAsk, usable: sshRun + sshAsk,
-      in_use: !!hosts.length, virtual: true,
-      extra: hosts.length === 1 && hosts[0] === '*' ? 'Any gateway'
-        : (hosts.length ? hosts.length + ' hosts' : 'No hosts yet') });
-    var web = (S.draft.websites || {});
-    var sites = (web.allow || []).length;
-    out.push({ key: 'Websites', name: 'Websites', kind: 'websites',
-      kind_words: 'Web', mark: 'WB', total: 1,
-      run: web.enabled && sites ? 1 : 0, ask: 0, depends: 0, frozen: 0,
-      display: 'Websites', none: web.enabled && sites ? 0 : 1,
-      usable: web.enabled && sites ? 1 : 0, in_use: !!web.enabled,
-      virtual: true,
-      extra: sites ? sites + ' sites allowed' : 'No sites allowed' });
     out.sort(function (a, b) {
       if (a.in_use !== b.in_use) return a.in_use ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -1708,7 +2185,6 @@
     return out;
   }
   function currentSummary(tiles) {
-    if (!tiles && S.summary && S.summary.summary && !isDirty()) return S.summary.summary;
     var list = tiles || currentTiles();
     var tools = 0, run = 0, ask = 0, depends = 0, frozen = 0, used = 0;
     list.forEach(function (t) {
@@ -1810,6 +2286,19 @@
     }
     return legend + '</div>';
   }
+  function toolShortcutsHtml() {
+    var hosts = (S.draft.ssh || {}).hosts || [];
+    var w = S.draft.websites || {};
+    return '<div class="x11-tool-shortcuts" data-tool-shortcuts>' +
+      '<button type="button" class="x11-shortcut" data-shortcut="run" onclick="x11Nav(\'run\')">' +
+      '<span><b>Run commands</b><span class="x11-shortcut-note">' +
+      (hosts.length ? esc(sshText()) : 'No machines yet') + '</span></span><span aria-hidden="true">\u2192</span></button>' +
+      '<button type="button" class="x11-shortcut" data-shortcut="websites" onclick="x11Nav(\'websites\')">' +
+      '<span><b>Websites</b><span class="x11-shortcut-note">' +
+      (w.enabled ? ((w.allow || []).length + ' site' + ((w.allow || []).length === 1 ? '' : 's')) : 'Off') +
+      '</span></span><span aria-hidden="true">\u2192</span></button></div>';
+  }
+
   function sectionTools() {
     var tiles = currentTiles();
     var q = (S.tileSearch || '').toLowerCase();
@@ -1836,8 +2325,9 @@
         ' can\u2019t use</button>';
     }
     return '<section class="x11-section" id="x11-sec-tools" data-x11-section="tools">' +
-      '<div class="x11-tools-head"><div><h2 class="x11-section-title">Tools</h2>' +
-      '<p class="x11-tools-summary" id="x11-tools-summary">' + esc(currentSummary(tiles)) + '</p></div>' +
+      '<div class="x11-tools-head"><div><h2 class="x11-section-title">Tools' + notSaved('tools') + '</h2>' +
+      '<p class="x11-tools-summary" id="x11-tools-summary">' + esc(currentSummary(tiles)) + '</p>' +
+      '<p class="x11-section-sub">Run commands and Websites are separate one-setting sections, not tool tiles.</p></div>' +
       '<button type="button" class="btn btn-muted btn-xs" data-json-toggle="tools" aria-expanded="false" ' +
       'onclick="x11ToggleJson(this)">Show JSON</button></div>' +
       '<div class="x11-chip-row" role="group" aria-label="Filter integrations">' + chips + '</div>' +
@@ -1845,7 +2335,7 @@
       'aria-label="Search integrations" value="' + attr(S.tileSearch) + '" oninput="x11TileSearch(this.value)"></div>' +
       '<div class="x11-tile-grid" data-tile-grid>' +
       (filtered.map(tileHtml).join('') || '<p class="x11-plain">No integrations match.</p>') + '</div>' +
-      legendHtml() + fold + jsonBlock('tools') + '</section>';
+      legendHtml() + fold + toolShortcutsHtml() + jsonBlock('tools') + '</section>';
   }
   function x11TileFilter(v) {
     S.tileFilter = ['in_use', 'not_connected', 'all'].indexOf(v) === -1 ? 'in_use' : v;
@@ -2055,7 +2545,8 @@
         esc(S.agent.name) + '</a> <span aria-hidden="true">/</span> <a href="#agent/' +
         Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a>' +
         ' <span aria-hidden="true">/</span> <span>' + esc(displayOf(group)) + '</span></nav>' +
-        '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) + '</h2></div>' +
+        '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) +
+      notSaved(isHA ? 'home_assistant' : 'tools') + '</h2></div>' +
         '<div class="x11-int-actions"><button type="button" class="btn btn-muted btn-xs" data-int-json ' +
         'onclick="x11ShowIntJson()">' + (S.intJsonOpen ? 'Hide JSON' : 'Show JSON') + '</button>' +
         '</div></div>' +
@@ -2071,7 +2562,7 @@
     var limits = '';
     if (!isHA || tab === 'tools') {
       body = '<p class="x11-int-sentence" data-int-sentence>' + esc(integrationSentence(group, tools)) + '</p>' +
-        toolGroupsHtml(tools, group);
+        readingAskHtml(group, tools) + toolGroupsHtml(tools, group);
       limits = limitsHtml(group, tools);
     } else if (tab === 'devices') {
       body = devicesTabHtml(group);
@@ -2084,19 +2575,21 @@
           : '<p class="x11-plain">No Files integration is linked to this Home Assistant.</p>') +
         filesFooterHtml(group);
       limits = limitsHtml(group, fileTools);
+    } else if (tab === 'homewide') {
+      body = homewideBodyHtml();
     }
     var tabs = '';
     if (isHA) {
       tabs = '<div class="x11-tabs x11-int-tabs" role="tablist" aria-label="Home Assistant sections">' +
         HA_TABS.map(function (x) {
           var label = ({ tools: 'Tools', devices: 'Devices', runs: 'Runs on its own',
-            files: 'Files' })[x];
+            files: 'Files', homewide: 'Home-wide' })[x];
           return '<button type="button" class="x11-tab" role="tab" data-int-tab="' + x +
             '" aria-selected="' + (tab === x) + '" onclick="x11IntegrationTab(\'' + x + '\')">' +
             label + '</button>';
         }).join('') + '</div>';
     }
-    var showJsonKey = (isHA && tab !== 'files') ? 'home_assistant' : 'int';
+    var showJsonKey = (isHA && tab !== 'files' && tab !== 'homewide') ? 'home_assistant' : 'int';
     return '<section class="x11-section" id="x11-sec-tools" data-x11-section="tools" data-integration="' +
       attr(group.integration) + '">' +
       '<button type="button" class="x11-back" onclick="x11ToolsBack()">\u2190 Back to tools</button>' +
@@ -2105,7 +2598,8 @@
       esc(S.agent.name) + '</a> <span aria-hidden="true">/</span> <a href="#agent/' +
       Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a>' +
       ' <span aria-hidden="true">/</span> <span>' + esc(displayOf(group)) + '</span></nav>' +
-      '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) + '</h2></div>' +
+      '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) +
+      notSaved(isHA ? 'home_assistant' : 'tools') + '</h2></div>' +
       '<div class="x11-int-actions"><button type="button" class="btn btn-muted btn-xs" data-int-json ' +
       'onclick="x11ShowIntJson()">' + (S.intJsonOpen ? 'Hide JSON' : 'Show JSON') + '</button>' +
       '</div></div>' + tabs +
@@ -2189,13 +2683,11 @@
     }
   }
 
-  function x11ToolChoice(btn) {
-    var name = btn.getAttribute('data-tool-name');
-    var choice = btn.getAttribute('data-choice');
+  function setToolChoice(name, choice, quiet) {
     var tool = toolList().filter(function (t) { return t.name === name; })[0] || {};
     if (choice === 'run' && tool.always_gate) {
-      setNotice('This tool always asks. Use Runs on its own with device permissions for Home Assistant.', 'warn');
-      return;
+      if (!quiet) setNotice('This tool always asks. Use Runs on its own with device permissions for Home Assistant.', 'warn');
+      return false;
     }
     var tools = S.draft.tools;
     if (choice === 'none') {
@@ -2214,9 +2706,58 @@
       tools.approval = tools.approval || {};
       tools.approval[name] = choice === 'run' ? 'ungated' : 'gated';
     }
+    return true;
+  }
+  function x11ToolChoice(btn) {
+    setToolChoice(btn.getAttribute('data-tool-name'), btn.getAttribute('data-choice'));
     S.section = 'tools';
     renderEditor();
     markDirty();
+  }
+  function x11AllowAllReading() {
+    integrationTools(toolGroup(S.integration)).forEach(function (tool) {
+      if (tool.read_only) setToolChoice(tool.name, 'run', true);
+    });
+    renderEditor(); markDirty();
+  }
+  function x11ChangesAsk() {
+    integrationTools(toolGroup(S.integration)).forEach(function (tool) {
+      if (!tool.read_only) setToolChoice(tool.name, 'ask', true);
+    });
+    renderEditor(); markDirty();
+  }
+  function readingAskHtml(group, tools) {
+    if (!group) return '';
+    var reading = tools.filter(function (t) { return t.read_only; });
+    var changing = tools.filter(function (t) { return !t.read_only; });
+    function readingAll() {
+      return reading.length && reading.every(function (t) {
+        return outcomeFor(t.name, t, S.draft) !== 'none';
+      });
+    }
+    function changesAsk() {
+      return changing.length && changing.every(function (t) {
+        var o = outcomeFor(t.name, t, S.draft);
+        return o === 'ask' || !!t.always_gate;
+      });
+    }
+    var buttons = [];
+    if (reading.length) {
+      buttons.push('<button type="button" class="x11-question" data-allow-reading ' +
+        'aria-pressed="' + readingAll() + '" onclick="x11AllowAllReading()">' +
+        '<span class="x11-question-title">Allow all reading</span>' +
+        '<span class="x11-question-note">' + reading.length + ' reading tool' +
+        (reading.length === 1 ? '' : 's') + ' can look things up.</span></button>');
+    }
+    if (changing.length) {
+      buttons.push('<button type="button" class="x11-question" data-changes-ask ' +
+        'aria-pressed="' + changesAsk() + '" onclick="x11ChangesAsk()">' +
+        '<span class="x11-question-title">Changes ask me first</span>' +
+        '<span class="x11-question-note">' + changing.length + ' changing tool' +
+        (changing.length === 1 ? '' : 's') + ' wait for your approval.</span></button>');
+    }
+    return buttons.length ? '<div class="x11-questions" data-int-questions>' +
+      buttons.join('') + '</div>' : '';
   }
   function x11DeviceChoice(btn) {
     var parts = (btn.getAttribute('data-device-action') || '').split('.');
@@ -2286,7 +2827,7 @@
   }
   function protectedLine() {
     return '<div class="x11-protected-line"><span aria-hidden="true">\u25a0</span> <b>Protected</b> ' +
-      '<a href="#" onclick="x11GoRules();return false;">Rules for all agents</a></div>';
+      '<a href="#" onclick="x11GoHomewide();return false;">Home-wide rules</a></div>';
   }
   function deviceToolsHtml() {
     return '<div class="x11-device-tools">' +
@@ -2327,7 +2868,7 @@
     }
     var actions = deviceActions();
     if (!actions.length) {
-      return '<div class="x11-device-wrap" id="x11-device-grid"><p class="x11-plain">No device actions are enabled under Rules for all agents.</p></div>';
+      return '<div class="x11-device-wrap" id="x11-device-grid"><p class="x11-plain">No device actions are enabled under Home-wide rules.</p></div>';
     }
     var search = S.deviceSearch.toLowerCase();
     var devices = (S.devices || []).filter(function (d) {
@@ -2601,71 +3142,138 @@
   }
   function x11DeviceSettings(v) { S.deviceSettings = !!v; renderEditor(); }
   function x11DeviceOnlyPerm(v) { S.deviceOnlyPerm = !!v; renderEditor(); }
-  function x11GoRules() { S.screen = 'agents'; S.tab = 'rules'; renderRules(); }
+  function x11GoHomewide() {
+    if (S.screen === 'editor' && S.agent) {
+      var ha = groupForKind('ha');
+      S.section = 'tools';
+      S.integration = ha ? ha.integration : '';
+      S.integrationTab = 'homewide';
+      setAgentHash(S.agent.id, 'tools', S.integration, 'homewide');
+      window.scrollTo(0, 0);
+      renderEditor();
+      return;
+    }
+    x11OpenHomewide('agents');
+  }
+  function x11GoRules() { x11GoHomewide(); }
 
   function sshControlsHtml() {
     var ssh = S.draft.ssh || {};
     var hosts = ssh.hosts || [];
+    var any = hosts.indexOf('*') !== -1;
     var all = (S.gateways || []).map(function (g) { return g.ip; });
     hosts.forEach(function (h) { if (h !== '*' && all.indexOf(h) === -1) all.push(h); });
-    all.sort();
-    var hostHtml = all.map(function (ip) {
-      return '<label><input type="checkbox" data-ssh-host="' + attr(ip) + '"' + (hosts.indexOf(ip) !== -1 ? ' checked' : '') +
-        ' onchange="x11ToggleHost(this)"> <span>' + esc(hostLabel(ip)) + '</span></label>';
+    all.sort(function (a, b) { return hostLabel(a).localeCompare(hostLabel(b)); });
+    var q = (S.machineSearch || '').toLowerCase();
+    var shown = all.filter(function (ip) {
+      return !q || hostLabel(ip).toLowerCase().indexOf(q) !== -1;
+    });
+    var hostHtml = shown.map(function (ip) {
+      var g = (S.gateways || []).filter(function (x) { return x.ip === ip; })[0] || {};
+      var name = (g.hostname || '').trim();
+      return '<label class="x11-machine" data-machine="' + attr(ip) + '">' +
+        '<input type="checkbox" data-ssh-host="' + attr(ip) + '"' +
+        (hosts.indexOf(ip) !== -1 ? ' checked' : '') +
+        ' onchange="x11ToggleHost(this)">' +
+        '<span class="x11-machine-text"><span class="x11-machine-name">' +
+        esc(name || ip) + '</span><span class="x11-machine-ip">' + esc(ip) + '</span></span></label>';
     }).join('');
-    return '<label class="x11-plain">Mode <select data-ssh-mode onchange="x11SetSshMode(this)">' +
-      '<option value="read_only"' + (ssh.mode === 'read_only' ? ' selected' : '') + '>Read only</option>' +
-      '<option value="approval"' + (ssh.mode === 'approval' ? ' selected' : '') + '>Always approve</option>' +
-      '<option value="normal"' + (ssh.mode === 'normal' ? ' selected' : '') + '>Gateway policy</option></select></label>' +
-      '<div class="x11-check-grid" style="margin-top:10px"><label><input type="checkbox" data-ssh-any ' +
-      (hosts.indexOf('*') !== -1 ? ' checked' : '') + ' onchange="x11ToggleAnyHost(this)"> Any registered gateway <code>*</code></label></div>' +
-      '<div class="x11-check-grid" style="margin-top:8px">' + (hostHtml || '<p class="x11-muted">No gateways yet.</p>') + '</div>';
+    var modes = [
+      ['normal', 'Follow each machine\u2019s rules',
+       'The gateway\u2019s allowlist still decides. An allowlisted command can run; anything else asks you.'],
+      ['approval', 'Always ask me',
+       'Every command waits for your approval.'],
+      ['read_only', 'Read-only',
+       'Only commands that read, such as uptime or df, are accepted.'],
+    ].map(function (m) {
+      return '<button type="button" class="x11-mode" data-ssh-mode="' + m[0] + '"' +
+        ' aria-pressed="' + (ssh.mode === m[0]) + '" onclick="x11SetSshModeValue(\'' +
+        m[0] + '\')"><span class="x11-mode-name">' + esc(m[1]) +
+        '</span><span class="x11-mode-note">' + esc(m[2]) + '</span></button>';
+    }).join('');
+    return '<p class="x11-int-sentence">This is the only SSH setting. Picking a machine adds the ' +
+      '<code>ssh_exec</code> tool to an allowlist agent automatically; removing the last machine removes it.</p>' +
+      '<div class="x11-machine-tools"><input id="x11-machine-search" type="search" placeholder="Search machines" ' +
+      'aria-label="Search machines" value="' + attr(S.machineSearch) + '" oninput="x11MachineSearch(this.value)"></div>' +
+      '<label class="x11-any-machine"><input type="checkbox" data-ssh-any' +
+      (any ? ' checked' : '') + ' onchange="x11ToggleAnyHost(this)"> Any machine ' +
+      '<span class="x11-muted">including machines enrolled later</span></label>' +
+      '<div class="x11-machine-list" data-machine-list>' +
+      (hostHtml || '<p class="x11-muted">No machines match.</p>') + '</div>' +
+      '<div class="x11-mode-list" role="group" aria-label="How commands are approved">' + modes + '</div>';
   }
-  function sectionSsh() {
-    return '<section class="x11-section" id="x11-sec-ssh" data-x11-section="ssh">' +
-      head('SSH', 'Which gateways this agent may run commands on. The gateway policy still applies on top.', 'ssh') +
-      sshControlsHtml() + jsonBlock('ssh') + '</section>';
+  function sectionRun() {
+    var hosts = (S.draft.ssh || {}).hosts || [];
+    return '<section class="x11-section" id="x11-sec-run" data-x11-section="run">' +
+      head('Run commands', 'Which machines this agent may run commands on, and when it must ask you.', 'ssh', 'ssh') +
+      sshControlsHtml() +
+      '<p class="x11-section-sub">' + (hosts.length
+        ? 'Currently: ' + esc(sshText()) + '.'
+        : 'No machines yet. The agent cannot run commands.') + '</p>' +
+      jsonBlock('ssh') + '</section>';
   }
   function x11SetSshMode(sel) { S.draft.ssh.mode = sel.value; markDirty(); }
+  function x11SetSshModeValue(mode) {
+    if (['normal', 'approval', 'read_only'].indexOf(mode) === -1) return;
+    S.draft.ssh.mode = mode;
+    markDirty();
+    renderEditor();
+  }
+  function x11MachineSearch(v) {
+    S.machineSearch = v;
+    var y = window.scrollY;
+    renderEditor();
+    window.scrollTo(0, y);
+    var input = el('x11-machine-search');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
   function x11ToggleHost(cb) {
     var ip = cb.getAttribute('data-ssh-host');
     var hosts = S.draft.ssh.hosts || [];
+    hosts = hosts.filter(function (x) { return x !== '*'; });
     if (cb.checked) { if (hosts.indexOf(ip) === -1) hosts.push(ip); }
     else hosts = hosts.filter(function (x) { return x !== ip; });
     S.draft.ssh.hosts = hosts;
+    syncDraftTools();
     markDirty();
   }
   function x11ToggleAnyHost(cb) {
-    var hosts = (S.draft.ssh.hosts || []).filter(function (x) { return x !== '*'; });
+    var hosts = [];
     if (cb.checked) {
-      if (!window.confirm('Allow this agent on every gateway, including every gateway enrolled later?')) { cb.checked = false; return; }
-      hosts.push('*');
+      if (!window.confirm('Allow this agent on every machine, including every machine enrolled later?')) { cb.checked = false; return; }
+      hosts = ['*'];
     }
     S.draft.ssh.hosts = hosts;
+    syncDraftTools();
     renderEditor(); markDirty();
   }
 
   function websitesControlsHtml() {
     var w = S.draft.websites || {};
-    return '<label class="x11-plain"><input type="checkbox" data-web-enabled' + (w.enabled ? ' checked' : '') +
-      ' onchange="x11SetWebEnabled(this)"> Web fetch is enabled</label>' +
-      '<div style="margin-top:10px"><label class="x11-plain" for="x11-web-allow">Allowed sites (one per line)</label>' +
-      '<textarea id="x11-web-allow" class="w-full text-xs" rows="4" data-web-list="allow" oninput="x11SetWebList(this)">' +
-      esc((w.allow || []).join('\n')) + '</textarea></div>' +
-      '<div style="margin-top:10px"><label class="x11-plain" for="x11-web-deny">Blocked sites (one per line)</label>' +
-      '<textarea id="x11-web-deny" class="w-full text-xs" rows="3" data-web-list="deny" oninput="x11SetWebList(this)">' +
-      esc((w.deny || []).join('\n')) + '</textarea></div>';
+    return '<label class="x11-switch-line"><input type="checkbox" data-web-enabled' +
+      (w.enabled ? ' checked' : '') + ' onchange="x11SetWebEnabled(this)">' +
+      '<span><b>Let this agent fetch websites</b><span class="x11-switch-note">' +
+      'Everything not listed below is blocked.</span></span></label>' +
+      '<div class="x11-field"><label for="x11-web-allow">Sites it may fetch</label>' +
+      '<textarea id="x11-web-allow" rows="5" data-web-list="allow" oninput="x11SetWebList(this)" ' +
+      'placeholder="docs.example.test">' + esc((w.allow || []).join('\n')) + '</textarea></div>' +
+      '<p class="x11-section-sub">Adding a site also adds the <code>web_fetch_url</code> tool for an ' +
+      'allowlist agent, in the same save. There is no separate tool switch.</p>';
   }
   function sectionWebsites() {
-    var w = S.draft.websites || {};
     return '<section class="x11-section" id="x11-sec-websites" data-x11-section="websites">' +
-      head('Websites', 'Which sites this agent may fetch. Everything not listed is blocked.', 'websites') +
+      head('Websites', 'One setting: on or off, and which sites. Everything else is blocked.', 'websites', 'websites') +
       websitesControlsHtml() + jsonBlock('websites') + '</section>';
   }
-  function x11SetWebEnabled(cb) { S.draft.websites.enabled = !!cb.checked; markDirty(); }
+  function x11SetWebEnabled(cb) {
+    S.draft.websites.enabled = !!cb.checked;
+    syncDraftTools();
+    markDirty();
+  }
   function x11SetWebList(input) {
     var list = input.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
     S.draft.websites[input.getAttribute('data-web-list')] = list;
+    syncDraftTools();
     markDirty();
   }
 
@@ -2792,12 +3400,7 @@
   }
   function newAgentModalHtml() {
     return '<div id="x11-new-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="x11-new-title">' +
-      '<div class="x11-new-card-modal"><h2 id="x11-new-title">New agent</h2>' +
-      '<p class="x11-plain">Give the agent a name. The token is shown once.</p>' +
-      '<label class="x11-plain" for="x11-new-name">Name</label><input id="x11-new-name" type="text" placeholder="household-agent">' +
-      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" id="x11-new-create" onclick="x11CreateAgent()">Create agent</button>' +
-      '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseNew()">Cancel</button></div>' +
-      '<div id="x11-new-result"></div></div></div>';
+      '<div class="x11-new-card-modal"><div id="x11-new-body"></div></div></div>';
   }
 
   function previewItems(p) {
@@ -2920,20 +3523,28 @@
         block('New or changed', newRisks) + block('Already allowed, confirm again', oldRisks) +
         '<label class="x11-ack"><input type="checkbox" data-x11-ack="risk" onchange="x11PreviewAck()"> I understand these are risky.</label></div>';
     }
-    var body = '<div class="x11-preview-target">Applying to <strong>' + esc((p.agent || {}).name || S.agent.name) + '</strong></div>' +
-      '<p class="x11-preview-line">' + esc(previewSentence(p)) + '</p>' +
-      (sectionLines.length ? '<div class="x11-preview-line x11-muted">' + sectionLines.join('') + '</div>' : '') +
-      riskHtml +
-      (resumes.length ? '<div class="x11-preview-warn"><p class="x11-preview-line"><strong>Will resume</strong></p>' +
-        resumes.map(function (r) { return '<p class="x11-preview-line">' + esc(r.name || (r.domain + '.' + r.service)) + ' \u2014 ' + esc(reasonWords(r.reason)) + (r.will_pin_to_current_ha ? ' (re-pins to the current Home Assistant)' : '') + '</p>'; }).join('') +
-        '<label class="x11-ack"><input type="checkbox" data-x11-ack="resume" onchange="x11PreviewAck()"> Resume these paused permissions.</label></div>' : '') +
-      (waiting.length ? '<div class="x11-preview-line"><strong>Will also add, waiting to join</strong><br>' +
-        waiting.map(function (w) { return esc((w.entities || []).map(function (e) { return e.name || e.entity_id; }).join(', ')); }).join('<br>') + '</div>' : '') +
-      '<p class="x11-preview-line x11-muted">Nothing has changed yet.</p>' +
-      '<div class="x11-preview-actions"><button type="button" class="btn btn-muted btn-sm" onclick="x11ClosePreview()">Cancel</button>' +
+    var simple = !risks.length && !resumes.length && !waiting.length;
+    var title = el('x11-preview-title');
+    if (title) title.hidden = simple;
+    var actions = '<div class="x11-preview-actions"><button type="button" class="btn btn-muted btn-sm" onclick="x11ClosePreview()">Cancel</button>' +
       '<button type="button" class="btn btn-sm" id="x11-preview-apply" onclick="x11ApplyPreview()"' +
       ((p.risk_ack_required || p.resume_ack_required) ? ' disabled' : '') + '>' +
       (p.risk_ack_required ? 'Allow and save' : 'Apply') + '</button></div>';
+    var body;
+    if (simple) {
+      body = '<p class="x11-preview-line">' + esc(p.summary || previewSentence(p)) + '</p>' + actions;
+    } else {
+      body = '<div class="x11-preview-target">Applying to <strong>' + esc((p.agent || {}).name || S.agent.name) + '</strong></div>' +
+        '<p class="x11-preview-line">' + esc(previewSentence(p)) + '</p>' +
+        (sectionLines.length ? '<div class="x11-preview-line x11-muted">' + sectionLines.join('') + '</div>' : '') +
+        riskHtml +
+        (resumes.length ? '<div class="x11-preview-warn"><p class="x11-preview-line"><strong>Will resume</strong></p>' +
+          resumes.map(function (r) { return '<p class="x11-preview-line">' + esc(r.name || (r.domain + '.' + r.service)) + ' \u2014 ' + esc(reasonWords(r.reason)) + (r.will_pin_to_current_ha ? ' (re-pins to the current Home Assistant)' : '') + '</p>'; }).join('') +
+          '<label class="x11-ack"><input type="checkbox" data-x11-ack="resume" onchange="x11PreviewAck()"> Resume these paused permissions.</label></div>' : '') +
+        (waiting.length ? '<div class="x11-preview-line"><strong>Will also add, waiting to join</strong><br>' +
+          waiting.map(function (w) { return esc((w.entities || []).map(function (e) { return e.name || e.entity_id; }).join(', ')); }).join('<br>') + '</div>' : '') +
+        '<p class="x11-preview-line x11-muted">Nothing has changed yet.</p>' + actions;
+    }
     el('x11-preview-body').innerHTML = body;
     modal.classList.remove('hidden');
     var first = modal.querySelector('input[type="checkbox"], button');
@@ -2967,10 +3578,15 @@
         risk_ack: !!(p.risk_ack_required && risk && risk.checked),
         resume_ack: !!(p.resume_ack_required && resume && resume.checked),
       }),
-    }).then(function () {
+    }).then(function (body) {
       x11ClosePreview();
+      var summary = (body && body.summary) || 'Changes saved.';
       toast('Saved', 'success');
-      reloadAgent(false);
+      try {
+        window.sessionStorage.setItem('eshu.x11.saved.' + Number(S.agent.id), summary);
+      } catch (e) { /* private mode */ }
+      S.savedNotice = summary;
+      reloadAgent(true);
     }).catch(function (e) {
       x11ClosePreview();
       var code = e.detail && e.detail.code;
@@ -2988,8 +3604,9 @@
     var n = sectionDiffCount();
     var bar = el('x11-savebar');
     var count = el('x11-change-count');
-    if (count) count.textContent = n + ' change' + (n === 1 ? '' : 's');
+    if (count) count.textContent = changeSummaryText();
     if (bar) bar.hidden = !n;
+    syncNotSaved();
     syncSavebarSpace();
   }
   function x11Discard() {
@@ -2998,12 +3615,19 @@
     renderEditor();
     toast('Changes discarded', 'success');
   }
-  function x11Back() {
+  function x11Back(force) {
+    if (!force && isDirty()) {
+      showLeaveWarning(function () { x11Back(true); });
+      return;
+    }
     clearAgentHash();
-    S.screen = 'agents'; S.agent = null; S.draft = null; S.config = null;
-    S.integration = ''; S.integrationTab = '';
+    if (/^#home-?wide\b/.test(String(window.location.hash || ''))) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    S.screen = 'agents'; S.tab = 'agents'; S.agent = null; S.draft = null; S.config = null;
+    S.integration = ''; S.integrationTab = ''; S.homewideBack = '';
     if (root()) root().style.paddingBottom = '';
-    S.tab = 'agents'; renderAgents(); loadAgents();
+    renderAgents(); loadAgents();
   }
 
   function x11ToggleJson(btn) {
@@ -3041,33 +3665,269 @@
       .catch(function (e) { setNotice(errText(e), 'error'); });
   }
 
+  function newAgentState() {
+    if (!S.newAgent) {
+      S.newAgent = {
+        step: 1, name: '', template: 'household', integrations: {},
+        hosts: {}, id: null, token: '', busy: false, error: '', applied: false,
+      };
+      var tpl = TEMPLATES[S.newAgent.template];
+      newAgentTemplateIntegrations(S.newAgent.template, tpl);
+    }
+    return S.newAgent;
+  }
+  function newAgentTemplateIntegrations(key, tpl) {
+    var st = S.newAgent;
+    st.integrations = {};
+    var list = wizardIntegrations();
+    if (!tpl) return;
+    if (tpl.integrations === 'none') return;
+    list.forEach(function (i) {
+      var kind = String(i.kind || '').toLowerCase();
+      if (tpl.integrations === 'ha') {
+        if (kind === 'ha') st.integrations[i.name] = true;
+      } else if (kind !== 'webfetch') {
+        st.integrations[i.name] = true;
+      }
+    });
+  }
+  function wizardIntegrations() {
+    return (S.integrations || []).filter(function (i) {
+      var kind = String(i.kind || '').toLowerCase();
+      return i.enabled !== false && i.enabled !== 0 && kind !== 'ha_ssh' && kind !== 'webfetch';
+    });
+  }
   function x11NewAgent() {
-    var m = el('x11-new-modal'); if (!m) return;
-    var result = el('x11-new-result'); if (result) result.innerHTML = '';
-    var name = el('x11-new-name'); if (name) name.value = '';
-    m.classList.remove('hidden');
-    if (name) name.focus();
+    S.newAgent = null;
+    newAgentState();
+    renderNewAgent();
+    var m = el('x11-new-modal'); if (m) m.classList.remove('hidden');
+    var input = el('x11-new-name');
+    if (input) input.focus();
+  }
+  function newAgentStepNames() {
+    return ['Name and purpose', 'Integrations', 'Machines', 'Review', 'Token'];
+  }
+  function newAgentReviewText(st) {
+    var name = st.name.trim() || 'This agent';
+    var tpl = TEMPLATES[st.template] || TEMPLATES.empty;
+    var ints = Object.keys(st.integrations).filter(function (n) { return st.integrations[n]; });
+    var hosts = Object.keys(st.hosts).filter(function (h) { return st.hosts[h]; });
+    var bits = [];
+    if (tpl.writes === 'none') bits.push('can read only');
+    else if (ints.length) bits.push('can read');
+    if (tpl.writes !== 'none' && ints.length) bits.push('asks you before anything changes');
+    bits.push(ints.length ? 'in ' + ints.join(', ') : 'with no integrations yet');
+    bits.push(hosts.length ? 'can run commands on ' + hosts.map(hostLabel).join(', ') : 'cannot run commands');
+    return name + ' ' + bits.join(', ') + '.';
+  }
+  function renderNewAgent() {
+    var st = newAgentState();
+    var box = el('x11-new-body');
+    if (!box) return;
+    var steps = newAgentStepNames();
+    var head = '<div class="x11-wizard-head"><p class="x11-wizard-step">Step ' + st.step +
+      ' of 5 \u00b7 ' + esc(steps[st.step - 1]) + '</p><h2 id="x11-new-title">New agent</h2></div>';
+    var body = '';
+    if (st.step === 1) {
+      body = '<label class="x11-field" for="x11-new-name">Name</label>' +
+        '<input id="x11-new-name" type="text" value="' + attr(st.name) +
+        '" placeholder="household-agent" oninput="x11NewName(this.value)">' +
+        '<p class="x11-section-sub">What is it for? This only pre-fills the next steps.</p>' +
+        '<div class="x11-template-list" data-template-list>' +
+        Object.keys(TEMPLATES).map(function (key) {
+          var t = TEMPLATES[key];
+          return '<button type="button" class="x11-template" data-template="' + key +
+            '" aria-pressed="' + (st.template === key) + '" onclick="x11NewTemplate(\'' +
+            key + '\')"><span class="x11-template-name">' + esc(t.label) +
+            '</span><span class="x11-template-note">' + esc(t.blurb) + '</span></button>';
+        }).join('') + '</div>';
+    } else if (st.step === 2) {
+      var ints = wizardIntegrations();
+      body = '<p class="x11-section-sub">Which integrations may it use? The template pre-ticked these.</p>' +
+        '<div class="x11-pick-list" data-new-integrations>' +
+        (ints.map(function (i) {
+          return '<label class="x11-pick"><input type="checkbox" data-new-integration="' +
+            attr(i.name) + '"' + (st.integrations[i.name] ? ' checked' : '') +
+            ' onchange="x11NewIntegration(this)"><span><b>' + esc(displayNameFor(i)) +
+            '</b><span class="x11-pick-note">' + esc(kindWords(i.kind)) + '</span></span></label>';
+        }).join('') || '<p class="x11-muted">No integrations are configured yet.</p>') + '</div>';
+    } else if (st.step === 3) {
+      var hosts = (S.gateways || []).slice().sort(function (a, b) {
+        return hostLabel(a.ip).localeCompare(hostLabel(b.ip));
+      });
+      body = '<p class="x11-section-sub">Which machines may it run commands on? Optional.</p>' +
+        '<div class="x11-pick-list" data-new-machines>' +
+        (hosts.map(function (g) {
+          return '<label class="x11-pick"><input type="checkbox" data-new-host="' + attr(g.ip) + '"' +
+            (st.hosts[g.ip] ? ' checked' : '') + ' onchange="x11NewHost(this)"><span><b>' +
+            esc(g.hostname || g.ip) + '</b><span class="x11-pick-note">' + esc(g.ip) + '</span></span></label>';
+        }).join('') || '<p class="x11-muted">No machines are registered yet.</p>') + '</div>' +
+        '<p class="x11-section-sub">Picking a machine also adds <code>ssh_exec</code>; there is no second switch.</p>';
+    } else if (st.step === 4) {
+      body = '<p class="x11-review" data-new-review>' + esc(newAgentReviewText(st)) + '</p>' +
+        '<p class="x11-section-sub">Create uses the normal agent create and a normal S5 apply. The token is shown once on the next step.</p>';
+    } else if (st.step === 5) {
+      body = '<p class="x11-plain"><strong>Agent created.</strong> Copy the token now; it is shown once.</p>' +
+        '<div class="x11-token-once" data-new-token>' + esc(st.token) + '</div>' +
+        '<div class="x11-connect"><p><b>MCP URL</b> <code>' + esc(location.origin) + '/mcp</code></p>' +
+        '<p><b>Header</b> <code>Authorization: Bearer ' + esc(st.token) + '</code></p></div>' +
+        '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-copy-token onclick="x11NewCopy()">Copy token</button>' +
+        '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseNew()">Done</button></div>';
+    }
+    var footer = '';
+    if (st.step < 5) {
+      footer = '<div class="x11-wizard-actions">' +
+        (st.step > 1 ? '<button type="button" class="btn btn-muted btn-sm" onclick="x11NewBack()">Back</button>' : '') +
+        '<button type="button" class="btn btn-muted btn-sm" onclick="x11CloseNew()">Cancel</button><span class="x11-flex"></span>' +
+        (st.step < 4
+          ? '<button type="button" class="btn btn-sm" id="x11-new-next" onclick="x11NewNext()">Continue</button>'
+          : '<button type="button" class="btn btn-sm" id="x11-new-create" onclick="x11NewCreate()"' +
+            (st.busy ? ' disabled' : '') + '>' + (st.busy ? 'Creating\u2026' : 'Create agent') + '</button>') +
+        '</div>';
+    }
+    box.innerHTML = head + (st.error ? '<div class="x11-notice" data-kind="error">' + esc(st.error) + '</div>' : '') +
+      body + footer;
+    if (st.step === 1) {
+      var name = el('x11-new-name');
+      if (name && document.activeElement !== name) name.focus();
+    }
+  }
+  function x11NewName(v) { newAgentState().name = v; }
+  function x11NewTemplate(key) {
+    var st = newAgentState();
+    if (!TEMPLATES[key]) return;
+    st.template = key;
+    newAgentTemplateIntegrations(key, TEMPLATES[key]);
+    renderNewAgent();
+  }
+  function x11NewIntegration(cb) {
+    var st = newAgentState();
+    st.integrations[cb.getAttribute('data-new-integration')] = !!cb.checked;
+  }
+  function x11NewHost(cb) {
+    var st = newAgentState();
+    st.hosts[cb.getAttribute('data-new-host')] = !!cb.checked;
+  }
+  function x11NewNext() {
+    var st = newAgentState();
+    if (st.step === 1 && !st.name.trim()) {
+      st.error = 'Give the agent a name first.';
+      renderNewAgent();
+      return;
+    }
+    st.error = '';
+    st.step = Math.min(4, st.step + 1);
+    renderNewAgent();
+  }
+  function x11NewBack() {
+    var st = newAgentState();
+    st.error = '';
+    st.step = Math.max(1, st.step - 1);
+    renderNewAgent();
+  }
+  function templateDocument(st, groups) {
+    var tpl = TEMPLATES[st.template] || TEMPLATES.empty;
+    var selected = Object.keys(st.integrations).filter(function (n) { return st.integrations[n]; });
+    var allow = [];
+    var approval = {};
+    (groups || []).forEach(function (g) {
+      if (selected.indexOf(g.integration) === -1) return;
+      var kind = String(g.kind || '').toLowerCase();
+      (g.tools || []).forEach(function (tool) {
+        if (tpl.writes === 'none' && !tool.read_only) return;
+        if (tpl.test && kind === 'ha' && !tool.read_only && tool.tool !== 'call_service') return;
+        if (tpl.test && kind !== 'ha') return;
+        allow.push(tool.name);
+        if (!tool.read_only) approval[tool.name] = 'gated';
+      });
+    });
+    var hosts = Object.keys(st.hosts).filter(function (h) { return st.hosts[h]; });
+    return {
+      schema_version: 1,
+      tools: { mode: 'allowlist', allow: Array.from(new Set(allow)).sort(),
+        approval: approval, argument_rules: {}, rate_limit_per_min: 0 },
+      ssh: { mode: (tpl.test || st.template === 'ops') ? 'normal'
+        : (st.template === 'observer' ? 'read_only' : 'approval'), hosts: hosts },
+      websites: { enabled: false, allow: [], deny: [] },
+      home_assistant: { permissions: [] },
+    };
+  }
+  function saveTemplateMark(id, key) {
+    try {
+      var raw = window.localStorage.getItem('eshu.x11.agentTemplates') || '{}';
+      var map = JSON.parse(raw);
+      map[String(id)] = key;
+      window.localStorage.setItem('eshu.x11.agentTemplates', JSON.stringify(map));
+    } catch (e) { /* a private window may refuse localStorage */ }
+  }
+  function applyConfigDocument(id, document) {
+    return api('/api/agents/' + Number(id) + '/config').then(function (cfg) {
+      return api('/api/agents/' + Number(id) + '/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document: document, preview: true,
+          version: cfg.version, risk_ack: false, preview_hash: '', resume_ack: false }),
+      }).then(function (preview) {
+        return api('/api/agents/' + Number(id) + '/config', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ document: document, preview: false,
+            version: cfg.version, preview_hash: preview.preview_hash,
+            risk_ack: !!preview.risk_ack_required,
+            resume_ack: !!preview.resume_ack_required }),
+        });
+      });
+    });
+  }
+  function x11NewCreate() {
+    var st = newAgentState();
+    if (st.busy) return;
+    st.busy = true; st.error = '';
+    renderNewAgent();
+    api('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: st.name.trim() }) })
+      .then(function (created) {
+        st.id = created.id; st.token = created.token;
+        return api('/api/agents/' + Number(st.id) + '/available-tools')
+          .then(function (tools) {
+            return applyConfigDocument(st.id, templateDocument(st, tools.integrations || []));
+          });
+      })
+      .then(function () {
+        st.applied = true;
+        saveTemplateMark(st.id, st.template);
+        st.busy = false;
+        st.step = 5;
+        renderNewAgent();
+      })
+      .catch(function (e) {
+        var text = errText(e);
+        if (st.id && !st.applied) {
+          api('/api/agents/' + Number(st.id), { method: 'DELETE' }).catch(function () {});
+        }
+        st.busy = false;
+        st.error = 'Could not create the agent: ' + text;
+        renderNewAgent();
+      });
+  }
+  function x11NewCopy() {
+    var st = newAgentState();
+    if (!st.token) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(st.token).then(function () { toast('Token copied', 'success'); });
+    } else {
+      toast('Select the token and copy it.', 'error');
+    }
   }
   function x11CloseNew() {
-    var m = el('x11-new-modal'); if (m) m.classList.add('hidden');
-    if (S.newCreated) { S.newCreated = false; S.agentsReady = false; x11Back(); }
+    var st = S.newAgent;
+    var m = el('x11-new-modal');
+    if (m) m.classList.add('hidden');
+    if (st && st.id && !st.applied) {
+      api('/api/agents/' + Number(st.id), { method: 'DELETE' }).catch(function () {});
+    }
+    S.newAgent = null;
+    if (st && st.applied) { S.agentsReady = false; if (S.screen === 'agents') loadAgents(); }
   }
-  function x11CreateAgent() {
-    var name = (el('x11-new-name') || {}).value || '';
-    name = name.trim();
-    if (!name) { toast('Agent name is required', 'error'); return; }
-    api('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }) })
-      .then(function (body) {
-        var box = el('x11-new-result');
-        if (box) box.innerHTML = '<p class="x11-plain">Token (copy now, shown once):</p>' +
-          '<div class="x11-token-once">' + esc(body.token) + '</div>' +
-          '<div class="x11-btn-row"><button type="button" class="btn btn-sm" onclick="x11CloseNew()">Done</button></div>';
-        S.newCreated = true;
-      })
-      .catch(function (e) { toast(errText(e), 'error'); });
-  }
-
   window.setTimeout(function () {
     if (parseAgentHash() && window.switchView) {
       window.switchView('agents');
@@ -3083,16 +3943,51 @@
         window.switchView('agents');
         return;
       }
-      if (!S.agent || Number(S.agent.id) !== target.id) x11OpenAgent(target.id, target.section, false, target);
+      if (!S.agent || Number(S.agent.id) !== target.id) {
+        if (!x11OpenAgent(target.id, target.section, false, target)) return;
+      }
       else {
         var old = S.section + '|' + S.integration + '|' + S.integrationTab;
         applyRoute(target);
         if (old !== S.section + '|' + S.integration + '|' + S.integrationTab) renderEditor();
       }
     } else {
+      if (S.screen === 'editor' && S.agent) {
+        if (isDirty() && !confirmLeave()) {
+          setAgentHash(S.agent.id, S.section, S.integration, S.integrationTab);
+          return;
+        }
+        S.draft = docOf(S.config);
+        x11Back(true);
+        return;
+      }
       x11ShowAgents();
     }
   });
+
+  window.addEventListener('beforeunload', function (event) {
+    if (!isDirty()) return undefined;
+    event.preventDefault();
+    event.returnValue = 'You have unsaved changes.';
+    return event.returnValue;
+  });
+
+  var x11BaseSwitchView = window.switchView;
+  if (typeof x11BaseSwitchView === 'function') {
+    window.switchView = function (target) {
+      var leavingEditor = S.screen === 'editor' && S.agent;
+      if (leavingEditor && isDirty()) {
+        showLeaveWarning(function () {
+          S.draft = docOf(S.config);
+          clearAgentHash();
+          x11BaseSwitchView.call(window, target);
+        });
+        return undefined;
+      }
+      if (leavingEditor) clearAgentHash();
+      return x11BaseSwitchView.apply(this, arguments);
+    };
+  }
 
   // Public entry points used by switchView and inline handlers.
   window.x11ShowAgents = x11ShowAgents;
@@ -3115,6 +4010,9 @@
   window.x11AddPermission = x11AddPermission;
   window.x11ShowDanger = x11ShowDanger;
   window.x11ReviewPaused = x11ReviewPaused;
+  window.x11CounterWaiting = x11CounterWaiting;
+  window.x11CounterPaused = x11CounterPaused;
+  window.x11CounterJoin = x11CounterJoin;
   window.x11ReviewWaiting = x11ReviewWaiting;
   window.x11AcceptJoin = x11AcceptJoin;
   window.x11AcceptAllJoin = x11AcceptAllJoin;
@@ -3122,6 +4020,8 @@
   window.x11ReofferJoin = x11ReofferJoin;
   window.x11Nav = x11Nav;
   window.x11ToolChoice = x11ToolChoice;
+  window.x11AllowAllReading = x11AllowAllReading;
+  window.x11ChangesAsk = x11ChangesAsk;
   window.x11SetDevice = x11SetDevice;
   window.x11SetActionMode = x11SetActionMode;
   window.x11SetLabel = x11SetLabel;
@@ -3133,7 +4033,12 @@
   window.x11DeviceSettings = x11DeviceSettings;
   window.x11DeviceOnlyPerm = x11DeviceOnlyPerm;
   window.x11GoRules = x11GoRules;
+  window.x11GoHomewide = x11GoHomewide;
+  window.x11OpenHomewide = x11OpenHomewide;
+  window.x11ShowHomewide = x11ShowHomewide;
   window.x11SetSshMode = x11SetSshMode;
+  window.x11SetSshModeValue = x11SetSshModeValue;
+  window.x11MachineSearch = x11MachineSearch;
   window.x11ToggleHost = x11ToggleHost;
   window.x11ToggleAnyHost = x11ToggleAnyHost;
   window.x11SetWebEnabled = x11SetWebEnabled;
@@ -3153,9 +4058,18 @@
   window.x11RevokeAgent = x11RevokeAgent;
   window.x11DeleteAgent = x11DeleteAgent;
   window.x11NewAgent = x11NewAgent;
-  window.x11CreateAgent = x11CreateAgent;
+  window.x11NewName = x11NewName;
+  window.x11NewTemplate = x11NewTemplate;
+  window.x11NewIntegration = x11NewIntegration;
+  window.x11NewHost = x11NewHost;
+  window.x11NewNext = x11NewNext;
+  window.x11NewBack = x11NewBack;
+  window.x11NewCreate = x11NewCreate;
+  window.x11NewCopy = x11NewCopy;
   window.x11CloseNew = x11CloseNew;
   window.x11Back = x11Back;
+  window.x11LeaveStay = x11LeaveStay;
+  window.x11LeaveGo = x11LeaveGo;
   window.x11More = x11More;
   window.x11ToolFilter = x11ToolFilter;
   window.x11ToolOnlyAllowed = x11ToolOnlyAllowed;
@@ -3164,6 +4078,12 @@
   window.x11StartProtect = x11StartProtect;
   window.x11CancelProtect = x11CancelProtect;
   window.x11ProtectedSettings = x11ProtectedSettings;
+  window.x11OpenTestSetup = x11OpenTestSetup;
+  window.x11CloseTestSetup = x11CloseTestSetup;
+  window.x11TestHost = x11TestHost;
+  window.x11ApplyTestSetup = x11ApplyTestSetup;
+  window.x11MintTestToken = x11MintTestToken;
+  window.x11TestTokenCopy = x11TestTokenCopy;
   window.x11LoadApproverTokens = x11LoadApproverTokens;
   window.x11ToggleTestAgent = x11ToggleTestAgent;
   window.x11MintApproverToken = x11MintApproverToken;

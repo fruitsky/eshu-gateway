@@ -49,7 +49,7 @@ for ip, host, seen in (("192.0.2.10", "web01.example.test", now - 20),
         conn.commit()
 
 agents = {}
-for name in ("ops-agent", "db-agent"):
+for name in ("ops-agent", "db-agent", "e2e-candidate", "phone-e2e"):
     _raw, aid = agent_tokens.create_agent_token(name)
     agents[name] = aid
 agent_policies.set_agent_policy(

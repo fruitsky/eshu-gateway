@@ -4432,11 +4432,16 @@ def _sync_web_fetch_access(refresh: bool = True):
     mode) adds/removes `web_fetch_url` from their tool allowlist. This is what
     lets the Controls panel grant access without a second manual list."""
     from db.integrations import update_tool
-    from db.web_fetch import web_fetch_callers
 
-    callers = web_fetch_callers()
+    policies = get_web_fetch_policies()
+    callers = [p['principal'] for p in policies if p.get('enabled')]
     principal_allow = callers or ['household']
     tool_keys = _web_fetch_tool_keys()
+    # The tool key follows the whole setting: on **and** at least one site.
+    # Enabled with an empty allowlist still answers every fetch with a denial,
+    # but it must not add a tool the operator did not grant.
+    allowed = {p['principal'].lower() for p in policies
+               if p.get('enabled') and (p.get('allow') or [])}
 
     for integration in get_integrations():
         if (integration.get('kind') or '').lower() != 'webfetch':
@@ -4447,7 +4452,6 @@ def _sync_web_fetch_access(refresh: bool = True):
             if (tool.get('principal_allow') or []) != principal_allow:
                 update_tool(tool['id'], principal_allow=principal_allow)
 
-    allowed = {c.lower() for c in callers}
     for agent in get_agent_tokens():
         policy = get_agent_policy(agent['id'])
         if (policy.get('tools_mode') or 'all') != 'allowlist':
@@ -4519,6 +4523,20 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
     return get_agent_policy(agent_id)
 
 
+@app.get("/api/e2e/commands")
+def e2e_commands_endpoint(request: Request):
+    """Read-only: the E2E suite's exact command list, so the T8 token form
+    cannot drift from `scripts/e2e/run.py COMMANDS`."""
+    _check_session(request)
+    import sys
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from scripts.e2e import run as e2e_run
+    return {'commands': list(e2e_run.COMMANDS)}
+
+
 @app.get("/api/agents/{agent_id}/activity")
 def agent_activity_endpoint(agent_id: int, request: Request):
     """X4: one agent's last activity, read-only.
@@ -4548,8 +4566,9 @@ def agent_activity_endpoint(agent_id: int, request: Request):
         cur = conn.cursor()
         cur.execute(
             'SELECT id, integration, tool, method, path, status_code, outcome, '
-            'approval, session_id, created_at FROM integration_calls '
-            'WHERE agent = ? ORDER BY id DESC LIMIT 20', (name,))
+            'approval, session_id, request_summary, created_at '
+            'FROM integration_calls WHERE agent = ? '
+            'ORDER BY id DESC LIMIT 20', (name,))
         calls = [dict(row) for row in cur.fetchall()]
     return {
         'agent': {'id': agent_id, 'name': name, 'revoked': agent.get('revoked')},

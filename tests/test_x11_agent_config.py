@@ -182,6 +182,30 @@ def test_a_protected_device_is_refused_even_with_a_tools_change(
     assert after['home_assistant'] == before['home_assistant']
 
 
+def test_an_unchanged_protected_paused_row_does_not_block_other_saves(
+        auth_client, agent, ha):
+    a.create_allowance('operator', agent['id'], 'Kettle', 'switch',
+                       'turn_off', ['switch.kettle'])
+    a.set_protected_entities('operator', ['switch.kettle'])
+    got = _get(auth_client, agent['id'])
+    assert got['home_assistant']['permissions'][0]['suspended_reason'] == 'protected'
+    document = _document(got)
+    document['tools'] = {'mode': 'allowlist',
+                         'allow': ['home_assistant_call_service'],
+                         'approval': {}, 'argument_rules': {},
+                         'rate_limit_per_min': 0}
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent['id'])
+    assert after['home_assistant']['permissions'][0]['suspended_at'] > 0
+    # A changed entity set is not exempt: protection still refuses the grant.
+    changed = _document(after)
+    changed['home_assistant']['permissions'][0]['entities'] = ['switch.kettle', 'switch.lamp']
+    r = _put(auth_client, agent['id'], changed, after['version'])
+    assert r.status_code == 400
+    assert r.json()['detail']['code'] == 'protected_device'
+
+
 def test_the_ceiling_never_allowed_and_risk_ack_are_enforced(
         auth_client, agent, ha):
     got = _get(auth_client, agent['id'])

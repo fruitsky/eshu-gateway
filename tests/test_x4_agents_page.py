@@ -139,9 +139,9 @@ def test_x4_one_agents_view_holds_the_agent_work():
     assert 'id="x11-root"' in view
     # The shell mounts one view; the tabs, editor and cards live in x11.js.
     js = _read('dashboard/static/x11.js')
-    for needed in ('x11-sec-overview', 'x11-sec-tools', 'x11-sec-ssh',
+    for needed in ('x11-sec-overview', 'x11-sec-run', 'x11-sec-tools',
                    'x11-sec-websites', 'x11-sec-activity', 'x11-sec-json',
-                   'agent-test-toggle', 'approver-token-list'):
+                   'data-test-setup-open', 'x11LoadApproverTokens'):
         assert needed in js, needed
     assert 'agent-policy-modal' not in html
     integrations = html[html.index('id="view-integrations"'):]

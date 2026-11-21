@@ -597,6 +597,13 @@ class TestAccessSync:
         assert 'web_fetch_url' in policy['tools']
         assert policy['rate_limit_per_min'] == 20
 
+    def test_enabled_with_no_sites_does_not_grant_the_tool(self, auth_client):
+        agent_id = self._setup()
+        r = auth_client.put('/api/web-fetch-policies/rowana-household',
+                            json={'enabled': True, 'allow': []})
+        assert r.status_code == 200, r.text
+        assert 'web_fetch_url' not in get_agent_policy(agent_id)['tools']
+
     def test_policy_disable_and_delete_revoke(self, auth_client):
         agent_id = self._setup()
         auth_client.put('/api/web-fetch-policies/rowana-household',

@@ -187,9 +187,9 @@ def test_any_gateway_asks_first_in_the_ui():
     import pathlib
     static = pathlib.Path(__file__).resolve().parent.parent / 'dashboard' / 'static'
     js = (static / 'x11.js').read_text()
-    assert 'every gateway enrolled later' in js
+    assert 'every machine enrolled later' in js
     toggle = js.split('function x11ToggleAnyHost(cb) {', 1)[1].split('\n  }', 1)[0]
-    first_push = toggle.find("hosts.push('*')")
-    assert first_push != -1
-    assert toggle.find('window.confirm(') < first_push
+    first_set = toggle.find("hosts = ['*']")
+    assert first_set != -1
+    assert toggle.find('window.confirm(') < first_set
     assert 'data-ssh-any' in js

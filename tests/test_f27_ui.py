@@ -16,11 +16,13 @@ def test_the_old_allowances_page_and_nav_item_are_removed():
     assert "// ── F27: Allowances" not in JS
 
 
-def test_agents_is_the_one_place_with_two_tabs():
+def test_agents_is_the_one_place_and_home_wide_lives_in_home_assistant():
     assert 'id="x11-root"' in HTML
-    for word in ("Agents", "Rules for all agents", "Protected devices",
-                 "Limits for all agents", "Never allowed"):
+    for word in ("Agents", "Home-wide", "Protected devices",
+                 "Limits for all agents", "Never allowed",
+                 "Applies to every agent"):
         assert word in X11
+    assert "Rules for all agents" not in X11
     assert "/api/agents/" in X11
     assert "/api/allowances/protected" in X11
     assert "/api/allowances/ceiling" in X11

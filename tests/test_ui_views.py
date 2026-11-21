@@ -21,7 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "tests" / "ui" / "ui_views.cjs"
-X11_HARNESS = ROOT / "tests" / "ui" / "x11_check.cjs"
+X11_HARNESS = ROOT / "tests" / "ui" / "x11_tasks.cjs"
 PASSWORD = "synthetic-ui-pass"
 
 
@@ -92,4 +92,4 @@ def test_x11_agents_ui(ui_server):
     if proc.returncode == 2:
         pytest.skip("headless Chromium not available: " + proc.stderr.strip()[:200])
     assert proc.returncode == 0, proc.stderr[-6000:]
-    assert "x11_check: ok" in proc.stdout
+    assert "x11_tasks: ok" in proc.stdout

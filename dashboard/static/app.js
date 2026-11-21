@@ -9829,7 +9829,11 @@ function renderIntegrationList() {
     var seedBtn = profile.seedable
       ? '<button onclick="seedTools(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Seed the catalog for this integration">Seed</button>'
       : '';
-    return '<button onclick="editIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
+    var homewideBtn = (i.kind === 'ha' && i.enabled)
+      ? '<button onclick="event.stopPropagation();x11OpenHomewide(\'agents\')" class="btn btn-xs btn-muted" title="Protected devices and limits for every agent">Home-wide rules</button>'
+      : '';
+    return homewideBtn +
+      '<button onclick="editIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       testBtn + seedBtn +
       '<button onclick="deleteIntegration(this, ' + escJs(i.name) + ')" class="btn btn-xs btn-muted">Delete</button>';
   }

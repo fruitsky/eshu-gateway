@@ -512,8 +512,9 @@ class TestUiSurface:
                     encoding='utf-8').read()
         js = open(os.path.join(root, 'dashboard', 'static', 'x11.js'),
                   encoding='utf-8').read()
-        for needle in ('agent-test-toggle', 'approver-commands',
-                       'approver-gateway', 'approver-token-list'):
+        for needle in ('data-test-setup-open', 'x11-test-commands',
+                       'data-test-host', 'x11ApplyTestSetup',
+                       'x11MintTestToken', 'x11TestTokenCopy'):
             assert needle in js
         for needle in ('x11ToggleTestAgent', 'x11MintApproverToken',
                        'x11RevokeApproverToken'):
