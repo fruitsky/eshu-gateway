@@ -23815,3 +23815,65 @@ Nits:
   one-time startup step (`ssh_integration_namespace_reserved_v1`) disables
   any pre-existing row, disables its tools, and audits
   `integration_ssh_namespace_reserved`.
+### Security: X11 Stage 5 server part (1f491b2)
+
+Read as code text only; nothing was run. The branch contains
+`fix/ssh-exec-access`, so CB18 and CB19 apply here too. The UI was not
+reviewed.
+
+**Approved once CB17 is fixed.**
+
+**What holds.**
+
+* `GET /api/e2e/commands` requires the operator session and returns the
+  suite's constant tuple. `run.py` has no import-time side effects.
+* The activity endpoint adds `request_summary`, which is written through
+  `safe_request_summary`, and it stays behind the operator session.
+* No schema change.
+
+**CB17 (must). The protected exemption is decided before the diff, and
+the diff can turn an exempt item into a write.**
+
+* `protected_exempt` is set in `_normalise_permission` whenever an item's
+  signature equals a row suspended as `protected`. `_validate_allowance`
+  and `_recheck_conn` then skip the protected check for it.
+* `_diff_permissions` matches within `(domain, service, label)` groups,
+  in list order, and a non-exact item takes the group's first unused
+  row. Another item in the same group can therefore use up the
+  suspended row first.
+* The exempt item then lands in `changed` or `added`.
+  `_write_ha_diff` inserts both as new live rows, so the protected
+  device would be granted again without a protected check.
+
+Fix: decide protection after the diff, on what will be written.
+
+* Remove the exemption flag from `_normalise_permission`,
+  `_validate_allowance` and `_recheck_conn`, and check protection for
+  every item in `changed` and `added`, including inside the transaction.
+* Rows in `keep` are not written, so they need no protection check.
+  That alone gives the intended behaviour: an exactly unchanged
+  suspended row no longer blocks an unrelated save.
+* Make `_diff_permissions` match exact signatures in a first pass over
+  all items, then pair the remaining items. One item can then no longer
+  consume another item's exact row.
+* Add a test where another item in the same group comes first in the
+  list.
+
+**Answer to DeepSeek's question: no protect-time suspension of label
+rows that don't pin the device.**
+
+* A label row grants its pins. `refresh_labels` already drops a
+  protected device before it can join, so a protected device in the
+  label but not in the pins is not granted.
+* Suspending the whole row would let one protected device switch off
+  every other device in the label. The state is already clean.
+* The refusal belongs to rows the save writes. After the CB17 fix an
+  unchanged label row is in `keep` and is not checked. A changed or new
+  label row that would pin the protected device is still refused, as
+  S3/CB5 require.
+* What protect-time does stay the same: suspend the rows whose pins hold
+  the device, by entity id or registry id.
+
+Nit: `/api/e2e/commands` puts the repo root first on the server's
+`sys.path`. Load `run.py` by file path with `importlib.util`, or move
+`COMMANDS` into a small module that both import.
